@@ -1,0 +1,38 @@
+# =======================================================================
+# **************    Projet : EDF Prediction Platform       **************
+# **************    Version : 1.0.0                        **************
+# =======================================================================
+#
+# .gitignore — Fichiers ignorés par Git
+# =======================================================================
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.log
+
+# Données locales (lac MinIO = volume Docker minio_data)
+data/eda/
+data/models/
+data/raw/*.xls
+data/raw/*.xlsx
+
+# Airflow
+airflow/logs/
+airflow/plugins/__pycache__/
+
+# Spark
+spark/logs/
+*.jar
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+.pytest_cache/
