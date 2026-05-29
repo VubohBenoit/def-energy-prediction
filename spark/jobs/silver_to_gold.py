@@ -1,5 +1,5 @@
 # =======================================================================
-# **************    Projet : EDF Prediction Platform       **************
+# **************    Projet : EDF Energy Prediction         **************
 # **************    Version : 1.0.0                        **************
 # =======================================================================
 #
@@ -11,7 +11,13 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from spark.common.config import GOLD_PATH, SILVER_PATH
+from spark.common.config import (
+    GOLD_DAILY_STAGING_TABLE,
+    GOLD_MONTHLY_STAGING_TABLE,
+    GOLD_PATH,
+    GOLD_PG_WRITE_MODE,
+    SILVER_PATH,
+)
 from spark.common.job_runner import configure_job_logging, get_job_spark, utc_now
 from spark.common.postgres import write_to_postgres
 from spark.transform.gold import (
@@ -22,6 +28,18 @@ from spark.transform.gold import (
 )
 
 logger = configure_job_logging("silver_to_gold")
+
+MONTHLY_PG_COLUMNS: list[str] = [
+    "year",
+    "month",
+    "season",
+    "consumption_mean_mw",
+    "consumption_total_twh",
+    "consumption_yoy_pct",
+    "renewable_pct",
+    "co2_mean_gkwh",
+    "trading_days",
+]
 
 
 def run(
@@ -38,6 +56,7 @@ def run(
     logger.info("  EDF ETL -> Gold")
     logger.info("  Silver : %s", silver_path)
     logger.info("  Gold   : %s", gold_path)
+    logger.info("  Gold PG : %s", GOLD_PG_WRITE_MODE)
     logger.info("═" * 78)
 
     spark = get_job_spark("EDF_Silver_to_Gold")
@@ -52,23 +71,22 @@ def run(
     write_gold_parquet(monthly_df, f"{gold_path.rstrip('/')}/monthly/", ["year"])
 
     if load_postgres:
-        write_to_postgres(daily_df, "dw.agg_daily", mode="overwrite")
-        monthly_pg_cols = [
-            "year",
-            "month",
-            "season",
-            "consumption_mean_mw",
-            "consumption_total_twh",
-            "consumption_yoy_pct",
-            "renewable_pct",
-            "co2_mean_gkwh",
-            "trading_days",
-        ]
+        write_to_postgres(
+            daily_df,
+            "dw.agg_daily",
+            mode=GOLD_PG_WRITE_MODE,
+            merge_keys=["date"],
+            staging_table=GOLD_DAILY_STAGING_TABLE,
+            touch_column="computed_at",
+        )
         write_to_postgres(
             monthly_df,
             "dw.agg_monthly",
-            columns=monthly_pg_cols,
-            mode="overwrite",
+            columns=MONTHLY_PG_COLUMNS,
+            mode=GOLD_PG_WRITE_MODE,
+            merge_keys=["year", "month"],
+            staging_table=GOLD_MONTHLY_STAGING_TABLE,
+            touch_column="computed_at",
         )
 
     daily_rows = daily_df.count()

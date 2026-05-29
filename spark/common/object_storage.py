@@ -1,5 +1,5 @@
 # =======================================================================
-# **************    Projet : EDF Prediction Platform       **************
+# **************    Projet : EDF Energy Prediction         **************
 # **************    Version : 1.0.0                        **************
 # =======================================================================
 #
@@ -14,10 +14,10 @@ import os
 from pathlib import Path
 
 from spark.common.config import (
-    MODEL_LOCAL_PATH,
     MODEL_PATH,
     REPORT_EDA_BUCKET,
     REPORT_EDA_S3_PREFIX,
+    resolve_model_local_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -146,5 +146,13 @@ def sync_model_artifacts(
 ) -> int:
     """Synchronizes model artifacts from MinIO to a local directory"""
     uri = model_s3_uri or MODEL_PATH
-    local = Path(local_dir or MODEL_LOCAL_PATH)
+    local = Path(local_dir) if local_dir else resolve_model_local_path()
     return sync_s3_prefix_to_local(uri, local)
+
+
+def sync_ml_report_artifacts(local_dir: Path | str | None = None) -> int:
+    """Synchronise ``{MODEL_PATH}/_report/`` depuis MinIO vers le répertoire local."""
+    uri = f"{MODEL_PATH.rstrip('/')}/_report/"
+    dest = Path(local_dir) if local_dir else resolve_model_local_path() / "_report"
+    dest.mkdir(parents=True, exist_ok=True)
+    return sync_s3_prefix_to_local(uri, dest)

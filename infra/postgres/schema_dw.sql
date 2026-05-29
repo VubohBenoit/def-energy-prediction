@@ -1,105 +1,11 @@
 -- ═══════════════════════════════════════════════════
--- EDF DW Schema — RTE éco2mix multi-years data (batch + streaming)
--- Tables: Bronze (raw) -> Silver (clean) -> Gold (aggregates)
+-- EDF Energy Prediction — RTE éco2mix multi-years data (batch + streaming)
+-- Bronze (raw) = MinIO Parquet only — Silver -> Gold in PostgreSQL
 -- ═══════════════════════════════════════════════════
 
 SET search_path TO dw, public;
 
 CREATE SCHEMA IF NOT EXISTS monitoring;
-
--- Bronze: raw data table
--- Good practice for production (batch + streaming):
---   • Truth source BRONZE = MinIO/S3 object storage (Parquet, xls_to_bronze /
---     consume_kafka_to_bronze job) — immutable, partitioned, re-playable.
---   • PostgreSQL only loads the BRONZE table optionally (audit SQL, future stream) ;
---     in batch testing, this table remains empty: expected.
---   • SQL analysis / Grafana / quality: Silver (dw.fact_consumption_silver) and Gold.
-CREATE TABLE IF NOT EXISTS dw.fact_consumption_bronze (
-    id              BIGSERIAL       NOT NULL,
-    source_file     VARCHAR(200)    NOT NULL,
-    ingested_at     TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
-    perimeter       VARCHAR(50),
-    nature          VARCHAR(100),
-    datetime        TIMESTAMPTZ     NOT NULL,
-    -- Consumption
-    consumption_mw  NUMERIC(10,2),
-    forecast_j1_mw  NUMERIC(10,2),
-    forecast_j_mw   NUMERIC(10,2),
-    -- Production by source (MW)
-    fuel_mw         NUMERIC(10,2),
-    coal_mw         NUMERIC(10,2),
-    gas_mw          NUMERIC(10,2),
-    nuclear_mw      NUMERIC(10,2),
-    wind_mw         NUMERIC(10,2),
-    solar_mw        NUMERIC(10,2),
-    hydro_mw        NUMERIC(10,2),
-    pumping_mw      NUMERIC(10,2),
-    bioenergy_mw    NUMERIC(10,2),
-    -- Exchanges
-    physical_exchanges_mw       NUMERIC(10,2),
-    co2_rate                    NUMERIC(8,2),
-    exchange_uk_mw              NUMERIC(10,2),
-    exchange_spain_mw           NUMERIC(10,2),
-    exchange_italy_mw           NUMERIC(10,2),
-    exchange_switzerland_mw     NUMERIC(10,2),
-    exchange_germany_belgium_mw NUMERIC(10,2),
-    -- Source details
-    fuel_tac_mw     NUMERIC(10,2),
-    fuel_cogen_mw   NUMERIC(10,2),
-    fuel_other_mw   NUMERIC(10,2),
-    gas_tac_mw      NUMERIC(10,2),
-    gas_cogen_mw    NUMERIC(10,2),
-    gas_ccg_mw      NUMERIC(10,2),
-    gas_other_mw    NUMERIC(10,2),
-    hydro_river_mw  NUMERIC(10,2),
-    hydro_lake_mw   NUMERIC(10,2),
-    hydro_step_mw   NUMERIC(10,2),
-    bioenergy_waste_mw   NUMERIC(10,2),
-    bioenergy_biomass_mw NUMERIC(10,2),
-    bioenergy_biogas_mw  NUMERIC(10,2),
-    battery_storage_mw   NUMERIC(10,2),
-    battery_release_mw   NUMERIC(10,2),
-    wind_onshore_mw      NUMERIC(10,2),
-    wind_offshore_mw     NUMERIC(10,2),
-    -- Kafka metadata
-    kafka_topic     VARCHAR(100),
-    kafka_offset    BIGINT,
-    kafka_partition INT,
-    PRIMARY KEY (datetime, id)
-) PARTITION BY RANGE (datetime);
-
--- Partitions by year (2020–2026)
-CREATE TABLE IF NOT EXISTS dw.fact_consumption_bronze_2020
-    PARTITION OF dw.fact_consumption_bronze
-    FOR VALUES FROM ('2020-01-01') TO ('2021-01-01');
-
-CREATE TABLE IF NOT EXISTS dw.fact_consumption_bronze_2021
-    PARTITION OF dw.fact_consumption_bronze
-    FOR VALUES FROM ('2021-01-01') TO ('2022-01-01');
-
-CREATE TABLE IF NOT EXISTS dw.fact_consumption_bronze_2022
-    PARTITION OF dw.fact_consumption_bronze
-    FOR VALUES FROM ('2022-01-01') TO ('2023-01-01');
-
-CREATE TABLE IF NOT EXISTS dw.fact_consumption_bronze_2023
-    PARTITION OF dw.fact_consumption_bronze
-    FOR VALUES FROM ('2023-01-01') TO ('2024-01-01');
-
-CREATE TABLE IF NOT EXISTS dw.fact_consumption_bronze_2024
-    PARTITION OF dw.fact_consumption_bronze
-    FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
-
-CREATE TABLE IF NOT EXISTS dw.fact_consumption_bronze_2025
-    PARTITION OF dw.fact_consumption_bronze
-    FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
-
-CREATE TABLE IF NOT EXISTS dw.fact_consumption_bronze_2026
-    PARTITION OF dw.fact_consumption_bronze
-    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
-
--- Index on datetime for all partitions
-CREATE INDEX IF NOT EXISTS idx_bronze_datetime ON dw.fact_consumption_bronze (datetime);
-CREATE INDEX IF NOT EXISTS idx_bronze_ingested ON dw.fact_consumption_bronze (ingested_at);
 
 -- Silver: cleaned and enriched data table
 CREATE TABLE IF NOT EXISTS dw.fact_consumption_silver (
@@ -167,6 +73,12 @@ CREATE TABLE IF NOT EXISTS dw.fact_consumption_silver_2025
 CREATE TABLE IF NOT EXISTS dw.fact_consumption_silver_2026
     PARTITION OF dw.fact_consumption_silver FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_silver_datetime ON dw.fact_consumption_silver (datetime);
+
+CREATE UNLOGGED TABLE IF NOT EXISTS dw.fact_consumption_silver_staging (
+    LIKE dw.fact_consumption_silver INCLUDING DEFAULTS
+);
+
 CREATE INDEX IF NOT EXISTS idx_silver_datetime ON dw.fact_consumption_silver (datetime);
 CREATE INDEX IF NOT EXISTS idx_silver_year_month ON dw.fact_consumption_silver (year, month);
 CREATE INDEX IF NOT EXISTS idx_silver_tempo ON dw.fact_consumption_silver (tempo_color) WHERE tempo_color IS NOT NULL;
@@ -216,6 +128,10 @@ CREATE TABLE IF NOT EXISTS dw.agg_daily (
 CREATE INDEX IF NOT EXISTS idx_agg_daily_year_month ON dw.agg_daily (year, month);
 CREATE INDEX IF NOT EXISTS idx_agg_daily_season ON dw.agg_daily (season);
 
+CREATE UNLOGGED TABLE IF NOT EXISTS dw.agg_daily_staging (
+    LIKE dw.agg_daily INCLUDING DEFAULTS
+);
+
 -- Gold: monthly aggregates table
 CREATE TABLE IF NOT EXISTS dw.agg_monthly (
     year                    SMALLINT,
@@ -241,6 +157,10 @@ CREATE TABLE IF NOT EXISTS dw.agg_monthly (
     trading_days            SMALLINT,
     computed_at             TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (year, month)
+);
+
+CREATE UNLOGGED TABLE IF NOT EXISTS dw.agg_monthly_staging (
+    LIKE dw.agg_monthly INCLUDING DEFAULTS
 );
 
 -- ETL metadata table
@@ -293,21 +213,6 @@ CREATE INDEX IF NOT EXISTS idx_model_metrics_trained_at
     ON etl.model_metrics (trained_at DESC);
 CREATE INDEX IF NOT EXISTS idx_model_metrics_model
     ON etl.model_metrics (model_name);
-
--- Schema alignment (already provisioned tables)
-ALTER TABLE dw.agg_monthly ADD COLUMN IF NOT EXISTS tempo_bleu_days SMALLINT;
-ALTER TABLE dw.agg_monthly ADD COLUMN IF NOT EXISTS tempo_blanc_days SMALLINT;
-ALTER TABLE dw.agg_monthly ADD COLUMN IF NOT EXISTS tempo_rouge_days SMALLINT;
-ALTER TABLE dw.agg_monthly ADD COLUMN IF NOT EXISTS nuclear_total_gwh NUMERIC(12,3);
-ALTER TABLE dw.agg_monthly ADD COLUMN IF NOT EXISTS wind_total_gwh NUMERIC(12,3);
-ALTER TABLE dw.agg_monthly ADD COLUMN IF NOT EXISTS solar_total_gwh NUMERIC(12,3);
-ALTER TABLE dw.agg_monthly ADD COLUMN IF NOT EXISTS hydro_total_gwh NUMERIC(12,3);
-ALTER TABLE dw.agg_monthly ADD COLUMN IF NOT EXISTS computed_at TIMESTAMPTZ DEFAULT NOW();
-
-ALTER TABLE dw.agg_daily ADD COLUMN IF NOT EXISTS tempo_color VARCHAR(10);
-ALTER TABLE dw.agg_daily ADD COLUMN IF NOT EXISTS off_peak_mean_mw NUMERIC(10,2);
-ALTER TABLE dw.agg_daily ADD COLUMN IF NOT EXISTS net_export_gwh NUMERIC(12,3);
-ALTER TABLE dw.agg_daily ADD COLUMN IF NOT EXISTS computed_at TIMESTAMPTZ DEFAULT NOW();
 
 -- Analytical views
 CREATE OR REPLACE VIEW dw.v_consumption_last_30_days AS

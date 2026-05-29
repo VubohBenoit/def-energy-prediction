@@ -1,5 +1,5 @@
 # =======================================================================
-# **************    Projet : EDF Prediction Platform       **************
+# **************    Projet : EDF Energy Prediction         **************
 # **************    Version : 1.0.0                        **************
 # =======================================================================
 #
@@ -29,8 +29,8 @@
 # 	make trigger-dag DAG=edf_ml_pipeline
 # 	make trigger-dag DAG=edf_quality_monitoring
 # 	make report-eda           Rapport complet (données + ML si entraîné)
-# 	make report-eda-data      Graphiques 01–03 (XLS)
-# 	make report-eda-ml        Graphique 04 (après pipeline ML)
+# 	make report-eda-data      3 graphiques données (XLS)
+# 	make report-eda-ml        Tuiles ML dashboard (après pipeline ML)
 # 	make logs                 Afficher les logs des conteneurs
 # 	make test                 Exécuter les tests
 # 	make clean                Nettoyer les fichiers temporaires
@@ -168,8 +168,8 @@ endef
 # =======================================================================
 
 .PHONY: help urls bootstrap pipeline pipeline-spark record-pipeline-run \
-        build up down down-force restart restart-spark status health kafka-ready init-kafka \
-        init-postgres-schema init-ml-schema ivy-ready spark-ready validate-xls-sources \
+        build up down down-force restart restart-airflow restart-spark status health kafka-ready init-kafka \
+        init-postgres-schema init-ml-schema ensure-spark-pool ivy-ready spark-ready validate-xls-sources \
         run-quality-checks check-ml-readiness \
         run-xls-to-bronze run-bronze-to-silver run-silver-to-gold \
         run-gold-to-model \
@@ -228,7 +228,7 @@ init-data-dirs: ## Créer data/raw, data/eda/report et data/models/rte
 	@mkdir -p data/raw data/eda/report data/models/rte
 	@printf "$(GREEN)[OK]$(NC) Arborescence data/ prête (raw + eda/report + models/rte).\n"
 
-bootstrap: init-data-dirs build up init-kafka init-postgres-schema health urls ## [Workflow] Étape 1 — dirs, build, stack, Kafka, schéma
+bootstrap: init-data-dirs build up init-kafka init-postgres-schema ensure-spark-pool health urls ## [Workflow] Étape 1 — dirs, build, stack, Kafka, schéma
 	@printf "\n$(GREEN)[OK]$(NC) Environnement prêt. Prochaine étape : $(YELLOW)make pipeline$(NC)\n"
 
 pipeline: trigger-pipeline-wait ml-metrics ## [Workflow] Étape 2 — Airflow prod-like (EDA orchestré par le DAG)
@@ -257,10 +257,15 @@ run-quality-checks: ## Contrôles qualité post-ETL PostgreSQL (bloquant si éch
 	@printf "$(BLUE)Contrôles qualité post-ETL$(NC)\n"
 	@$(AIRFLOW_EXEC) python -c "from edf_pipeline.quality import run_post_etl_quality_or_raise; run_post_etl_quality_or_raise('make pipeline-spark')"
 
-init-postgres-schema: ## Appliquer schema_dw.sql + migrations (idempotent)
+init-postgres-schema: ## Appliquer schema_dw.sql (idempotent)
 	$(call require-container,$(CN_AIRFLOW),make up)
 	@printf "$(BLUE)Initialisation schéma PostgreSQL$(NC)\n"
 	@$(AIRFLOW_EXEC) python -c "from edf_pipeline.schema import init_postgres_schema; init_postgres_schema()"
+
+ensure-spark-pool: ## Créer/mettre à jour le pool Airflow spark_cluster (1 slot)
+	$(call require-container,$(CN_AIRFLOW),make up)
+	@printf "$(BLUE)Pool Airflow Spark (mode professionnel)$(NC)\n"
+	@$(AIRFLOW_EXEC) python -c "from edf_pipeline.pools import ensure_spark_pool; print(ensure_spark_pool())"
 
 check-ml-readiness: ## Vérifier ML_MIN_TRAINING_ROWS avant entraînement ML
 	$(call require-container,$(CN_POSTGRES),make up)
@@ -296,8 +301,14 @@ down-force: ## Arrêt forcé si Airflow ne s'arrête pas (bug Docker Desktop)
 
 restart: down up ## Redémarrer la stack complète
 
+restart-airflow: ## Redémarrer Airflow (évite bug Docker Desktop « did not receive an exit event »)
+	@printf "$(YELLOW)[AIRFLOW]$(NC) Suppression forcée webserver + scheduler...\n"
+	-docker rm -f $(CN_AIRFLOW) $(CN_AIRFLOW_SCHED) 2>/dev/null
+	$(DOCKER_COMPOSE) up -d airflow-webserver airflow-scheduler
+	@printf "$(GREEN)[OK]$(NC) Airflow relancé (attendre ~1 min healthcheck webserver).\n"
+
 restart-spark: ## Redémarrer master + workers (ré-enregistrement cluster)
-	@printf "$(YELLOW)[SPARK]$(NC) Redémarrage master puis workers (3G, executor $(SPARK_EXECUTOR_MEMORY))...\n"
+	@printf "$(YELLOW)[SPARK]$(NC) Redémarrage master puis workers ($(SPARK_WORKER_MEMORY), executor $(SPARK_EXECUTOR_MEMORY))...\n"
 	$(DOCKER_COMPOSE) up -d spark-master spark-worker-1 spark-worker-2
 	@sleep 10
 	@printf "$(BLUE)[SPARK]$(NC) Attente enregistrement workers"
@@ -450,19 +461,19 @@ trigger-pipeline-wait: ivy-ready spark-ready ## Déclencher edf_pipeline_complet
 # RÉSULTATS & OBSERVABILITÉ
 # =======================================================================
 
-report-eda-data: ## Rapport pro : consommation + mensuel + qualité (01–03) — CLI manuel
+report-eda-data: ## Rapport pro : consommation + mensuel + qualité — CLI manuel
 	@printf "$(BLUE)Rapport EDA — données$(NC) → ./data/eda/report/ + MinIO rapport-eda\n"
 	@python3 -c "import pandas, matplotlib, boto3" 2>/dev/null || pip3 install -q pandas matplotlib boto3 psycopg2-binary
-	@POSTGRES_CONN=postgresql://$(PG_USER):edf123@localhost:5432/$(PG_DB) PYTHONPATH=. python3 scripts/generate_report_eda.py --data-only
+	@EDF_PROJECT_ROOT=$(CURDIR) DATA_DIR=$(CURDIR)/data/raw MODEL_LOCAL_PATH=data/models/rte POSTGRES_CONN=postgresql://$(PG_USER):edf123@localhost:5432/$(PG_DB) PYTHONPATH=. python3 scripts/generate_report_eda.py --data-only
 
-report-eda-ml: init-ml-schema ## Rapport pro : benchmark ML (04) — CLI manuel
+report-eda-ml: init-ml-schema ## Rapport pro : tuiles ML dashboard — CLI manuel
 	@printf "$(BLUE)Rapport EDA — ML$(NC) → ./data/eda/report/ + MinIO rapport-eda\n"
-	@python3 -c "import pandas, matplotlib, boto3" 2>/dev/null || pip3 install -q pandas matplotlib boto3 psycopg2-binary
-	@POSTGRES_CONN=postgresql://$(PG_USER):edf123@localhost:5432/$(PG_DB) PYTHONPATH=. python3 scripts/generate_report_eda.py --ml-only
+	@python3 -c "import pandas, matplotlib, pyarrow, boto3" 2>/dev/null || pip3 install -q pandas matplotlib pyarrow boto3 psycopg2-binary
+	@EDF_PROJECT_ROOT=$(CURDIR) DATA_DIR=$(CURDIR)/data/raw MODEL_LOCAL_PATH=data/models/rte POSTGRES_CONN=postgresql://$(PG_USER):edf123@localhost:5432/$(PG_DB) PYTHONPATH=. python3 scripts/generate_report_eda.py --ml-only
 
 report-eda: report-eda-data report-eda-ml ## Rapport pro complet (ML en attente si non entraîné)
 	@count=$$(find data/eda/report -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' '); \
-		if [ -f data/eda/report/04_performance_ml.pending ]; then \
+		if [ -f data/eda/report/ml_dashboard.pending ]; then \
 			printf "$(YELLOW)⏳$(NC) ML en attente — lancez $(YELLOW)make run-ml$(NC) puis $(YELLOW)make report-eda-ml$(NC)\n"; \
 		fi; \
 		printf "$(GREEN)✓$(NC) %s graphique(s) PNG dans data/eda/report/\n" "$$count"
@@ -479,7 +490,12 @@ record-pipeline-run: ## Enregistrer pipeline-spark dans etl.pipeline_runs (Grafa
 
 sync-models-local: init-data-dirs ## Télécharger models/ MinIO → data/models/rte/
 	@python3 -c "import boto3" 2>/dev/null || pip3 install -q boto3
-	@PYTHONPATH=. python3 -c "from spark.common.object_storage import sync_model_artifacts; n=sync_model_artifacts(); print(f'Sync OK — {n} fichier(s) → data/models/rte/')"
+	@EDF_PROJECT_ROOT=$(CURDIR) MODEL_LOCAL_PATH=data/models/rte PYTHONPATH=. python3 -c "\
+from spark.common.object_storage import sync_model_artifacts, sync_ml_report_artifacts; \
+from spark.common.config import resolve_model_local_path; \
+n=sync_model_artifacts(); \
+r=sync_ml_report_artifacts(); \
+print(f'Sync OK — {n} modèle(s), {r} artefact(s) rapport → {resolve_model_local_path()}')"
 
 ml-metrics: init-ml-schema ## Afficher les métriques ML (etl.model_metrics)
 	@docker exec $(CN_POSTGRES) psql -U $(PG_USER) -d $(PG_DB) -c "\

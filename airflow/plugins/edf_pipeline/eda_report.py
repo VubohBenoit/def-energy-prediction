@@ -13,7 +13,7 @@ from typing import Any
 
 from spark.common.eda_report import (
     generate_data_charts,
-    generate_ml_chart,
+    generate_ml_charts,
     mark_ml_pending,
     report_output_dir,
 )
@@ -32,7 +32,7 @@ def _handle_eda_result(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def generate_eda_data_report(**context) -> dict[str, Any]:
-    """Generate charts 01–03 (non-blocking by default)."""
+    """Generate data EDA charts (3 PNG, non-blocking by default)."""
     dag_id = context["dag"].dag_id
     try:
         paths = generate_data_charts(report_output_dir())
@@ -58,12 +58,12 @@ def generate_eda_data_report(**context) -> dict[str, Any]:
 
 
 def generate_eda_ml_report(**context) -> dict[str, Any]:
-    """Generate chart 04 after ML training (expects etl.model_metrics)."""
+    """Generate ML dashboard tiles (up to 6 PNG) after training."""
     dag_id = context["dag"].dag_id
     try:
-        path = generate_ml_chart(report_output_dir(), pending_if_missing=False)
-        if path is None:
-            msg = "ML metrics absent after training — chart 04 not generated"
+        paths = generate_ml_charts(report_output_dir(), pending_if_missing=False)
+        if not paths:
+            msg = "ML metrics absent after training — ML dashboard tiles not generated"
             logger.warning("%s (%s)", msg, dag_id)
             mark_ml_pending(report_output_dir())
             result = {"status": "warning", "reason": msg}
@@ -72,11 +72,12 @@ def generate_eda_ml_report(**context) -> dict[str, Any]:
 
         payload = {
             "status": "success",
-            "path": str(path),
+            "paths": [str(p) for p in paths],
+            "charts": len(paths),
             "destination": str(report_output_dir()),
         }
-        context["ti"].xcom_push(key="eda_ml_chart", value=payload["path"])
-        logger.info("EDA ML report (%s): %s", dag_id, payload["path"])
+        context["ti"].xcom_push(key="eda_ml_charts", value=payload["paths"])
+        logger.info("EDA ML report (%s): %d chart(s)", dag_id, payload["charts"])
         return payload
     except Exception as exc:
         logger.exception("EDA ML report failed (%s)", dag_id)

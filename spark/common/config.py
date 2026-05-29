@@ -1,5 +1,5 @@
 # =======================================================================
-# **************    Projet : EDF Prediction Platform       **************
+# **************    Projet : EDF Energy Prediction         **************
 # **************    Version : 1.0.0                        **************
 # =======================================================================
 #
@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 
 def _env(key: str, default: str) -> str:
@@ -49,8 +50,38 @@ MODEL_LOCAL_PATH: str = _env(
     "MODEL_LOCAL_PATH",
     "/opt/spark-data/models/rte",
 )
+
+
+def project_root() -> Path:
+    return Path(os.getenv("EDF_PROJECT_ROOT", Path.cwd()))
+
+
+def resolve_model_local_path() -> Path:
+    """Chemin local des modèles — conteneur Docker ou hôte ``data/models/rte``."""
+    root = project_root()
+    candidates: list[Path] = []
+
+    env_path = os.getenv("MODEL_LOCAL_PATH", "").strip()
+    if env_path:
+        p = Path(env_path)
+        candidates.append(p if p.is_absolute() else root / p)
+
+    default = Path(MODEL_LOCAL_PATH)
+    if default not in candidates:
+        candidates.append(default)
+
+    host_default = root / "data" / "models" / "rte"
+    if host_default not in candidates:
+        candidates.append(host_default)
+
+    for path in candidates:
+        if path.exists():
+            return path
+    return host_default
+
+
 REPORT_EDA_BUCKET: str = _env("REPORT_EDA_BUCKET", "rapport-eda")
-REPORT_EDA_S3_PREFIX: str = _env("REPORT_EDA_S3_PREFIX", "report/")
+REPORT_EDA_S3_PREFIX: str = _env("REPORT_EDA_S3_PREFIX", "")
 REPORT_EDA_LOCAL: str = _env("REPORT_EDA_LOCAL", "data/eda/report")
 DATA_DIR: str = _env("DATA_DIR", "/opt/airflow/data")
 
@@ -58,6 +89,33 @@ DATA_DIR: str = _env("DATA_DIR", "/opt/airflow/data")
 BRONZE_INCLUDE_STREAMING: bool = _env(
     "BRONZE_INCLUDE_STREAMING", "true"
 ).lower() in ("1", "true", "yes")
+
+# Silver PostgreSQL write mode:
+#   upsert    — insert + update on conflict (default, PG aligned with Parquet)
+#   merge     — insert if key absent only
+#   overwrite — truncate + full reload
+#   append    — blind append (legacy, may duplicate)
+SILVER_PG_WRITE_MODE: str = _env("SILVER_PG_WRITE_MODE", "upsert").lower()
+SILVER_PG_MERGE_KEYS: list[str] = [
+    k.strip()
+    for k in _env("SILVER_PG_MERGE_KEYS", "datetime").split(",")
+    if k.strip()
+]
+SILVER_PG_STAGING_TABLE: str = _env(
+    "SILVER_PG_STAGING_TABLE",
+    "dw.fact_consumption_silver_staging",
+)
+
+# Gold PostgreSQL write mode (same semantics as Silver).
+GOLD_PG_WRITE_MODE: str = _env("GOLD_PG_WRITE_MODE", "upsert").lower()
+GOLD_DAILY_STAGING_TABLE: str = _env(
+    "GOLD_DAILY_STAGING_TABLE",
+    "dw.agg_daily_staging",
+)
+GOLD_MONTHLY_STAGING_TABLE: str = _env(
+    "GOLD_MONTHLY_STAGING_TABLE",
+    "dw.agg_monthly_staging",
+)
 
 # PostgreSQL (JDBC) configuration.
 PG_URL: str = _env("POSTGRES_URL", "jdbc:postgresql://postgres:5432/edf_dw")

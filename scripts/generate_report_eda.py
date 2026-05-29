@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =======================================================================
-# **************    Projet : EDF Prediction Platform       **************
+# **************    Projet : EDF Energy Prediction         **************
 # **************    Version : 1.0.0                        **************
 # =======================================================================
 #
@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from spark.common.eda_report import (  # noqa: E402
     generate_data_charts,
-    generate_ml_chart,
+    generate_ml_charts,
     report_output_dir,
 )
 
@@ -38,16 +38,14 @@ def main() -> None:
     charts: list[str] = []
 
     if args.ml_only:
-        ml_path = generate_ml_chart(out)
-        if ml_path:
-            charts.append(ml_path)
+        paths = generate_ml_charts(out)
+        charts.extend(paths)
     elif args.data_only:
         charts.extend(generate_data_charts(out))
     else:
         charts.extend(generate_data_charts(out))
-        ml_path = generate_ml_chart(out)
-        if ml_path:
-            charts.append(ml_path)
+        paths = generate_ml_charts(out)
+        charts.extend(paths)
 
     print(f"\nProfessional report — {len(charts)} PNG chart(s) in {out}/")
 

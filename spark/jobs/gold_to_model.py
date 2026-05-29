@@ -1,5 +1,5 @@
 # =======================================================================
-# **************    Projet : EDF Prediction Platform       **************
+# **************    Projet : EDF Energy Prediction         **************
 # **************    Version : 1.0.0                        **************
 # =======================================================================
 #
@@ -16,6 +16,12 @@ from spark.common.config import MODEL_PATH, SILVER_PATH
 from spark.common.job_runner import configure_job_logging, get_job_spark, utc_now
 from spark.ml.constants import CANDIDATE_FEATURES, TRAIN_RATIO
 from spark.ml.metrics_store import persist_metrics_to_postgres
+from spark.ml.report_artifacts import (
+    build_split_summary,
+    compute_rf_learning_curve,
+    export_best_predictions,
+    save_ml_report_artifacts,
+)
 from spark.ml.training import (
     load_training_data,
     materialize_splits,
@@ -58,6 +64,23 @@ def run(
     )
 
     best_name = save_best_model(saved_paths, results, model_path)
+
+    logger.info("Computing ML report artifacts (learning curve, predictions)...")
+    learning_curve = compute_rf_learning_curve(train_df, test_df, feature_cols)
+    predictions = export_best_predictions(saved_paths, results, test_df, best_name)
+    split_summary = build_split_summary(train_df, test_df, n_train, n_test)
+    try:
+        save_ml_report_artifacts(
+            model_path,
+            predictions=predictions,
+            learning_curve=learning_curve,
+            split_summary=split_summary,
+            best_model=best_name,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        logger.error("Save ML report artifacts failed: %s", exc)
+
     if persist_pg:
         try:
             persist_metrics_to_postgres(results, run_id=run_id)
@@ -65,10 +88,15 @@ def run(
             logger.error("Persist metrics Postgres failed: %s", exc)
 
     try:
-        from spark.common.object_storage import sync_model_artifacts
+        from spark.common.object_storage import sync_ml_report_artifacts, sync_model_artifacts
 
         n_synced = sync_model_artifacts(model_path)
-        logger.info("Models synchronized MinIO -> local: %d file(s)", n_synced)
+        n_report = sync_ml_report_artifacts()
+        logger.info(
+            "Models synchronized MinIO -> local: %d file(s), report artifacts: %d",
+            n_synced,
+            n_report,
+        )
     except Exception as exc:
         logger.warning("Sync models MinIO -> local failed: %s", exc)
 

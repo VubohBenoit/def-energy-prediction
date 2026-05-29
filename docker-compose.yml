@@ -194,8 +194,6 @@ services:
     env_file:
       - .env
     environment:
-      SPARK_WORKER_MEMORY: 3G
-      SPARK_WORKER_CORES: 2
       SPARK_WORKER_WEBUI_PORT: 8081
       SPARK_WORKER_OPTS: "-Dspark.metrics.conf=/opt/spark/conf/metrics.properties"
     volumes:
@@ -205,7 +203,7 @@ services:
       - ./spark/jobs:/opt/spark-jobs:ro
       - ./data/raw:/opt/spark-data/raw:ro
       - spark_ivy_cache:/home/spark/.ivy2
-    mem_limit: 6144m
+    mem_limit: 12288m
     restart: unless-stopped
 
   # =======================================================================
@@ -222,8 +220,6 @@ services:
     env_file:
       - .env
     environment:
-      SPARK_WORKER_MEMORY: 3G
-      SPARK_WORKER_CORES: 2
       SPARK_WORKER_WEBUI_PORT: 8081
       SPARK_WORKER_OPTS: "-Dspark.metrics.conf=/opt/spark/conf/metrics.properties"
     volumes:
@@ -233,7 +229,7 @@ services:
       - ./spark/jobs:/opt/spark-jobs:ro
       - ./data/raw:/opt/spark-data/raw:ro
       - spark_ivy_cache:/home/spark/.ivy2
-    mem_limit: 6144m
+    mem_limit: 12288m
     restart: unless-stopped
 
   # =======================================================================
@@ -281,7 +277,11 @@ services:
       - ./rte_pipeline:/opt/airflow/project/rte_pipeline
       - ./spark:/opt/airflow/project/spark
       - ./infra/postgres:/opt/airflow/infra/postgres:ro
-    command: version
+    command: >
+      bash -c "
+      airflow version &&
+      airflow pools set spark_cluster 1 'Un seul job Spark REST actif (mode professionnel)' || true
+      "
     restart: on-failure
 
   # =======================================================================
@@ -290,6 +290,7 @@ services:
   airflow-webserver:
     image: edf-airflow:latest
     container_name: edf-airflow-webserver
+    init: true
     stop_grace_period: 30s
     depends_on:
       postgres:
@@ -320,13 +321,12 @@ services:
       SPARK_MASTER_URL: spark://spark-master:7077
       SPARK_JOBS_DIR: /opt/spark-jobs
       SPARK_EXTRA_JARS: /opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/postgresql-42.7.4.jar
-      SPARK_CLUSTER_DRIVER_MEMORY: 1g
-      SPARK_CLUSTER_ML_DRIVER_MEMORY: 1536m
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: edfadmin
       MINIO_SECRET_KEY: edfpassword123
       DATA_DIR: /opt/airflow/data/raw
       REPORT_EDA_LOCAL: /opt/airflow/data/eda/report
+      MODEL_LOCAL_PATH: /opt/airflow/data/models/rte
       EDF_ENVIRONMENT: dev
       POSTGRES_CONN: postgresql://edf:edf123@postgres:5432/edf_dw
       SCHEMA_DW_SQL: /opt/airflow/infra/postgres/schema_dw.sql
@@ -339,6 +339,7 @@ services:
       - ./airflow/plugins:/opt/airflow/plugins
       - ./data/raw:/opt/airflow/data/raw:ro
       - ./data/eda:/opt/airflow/data/eda
+      - ./data/models:/opt/airflow/data/models
       - ./rte_pipeline:/opt/airflow/project/rte_pipeline
       - ./spark:/opt/airflow/project/spark
       - ./infra/postgres:/opt/airflow/infra/postgres:ro
@@ -359,6 +360,7 @@ services:
   airflow-scheduler:
     image: edf-airflow:latest
     container_name: edf-airflow-scheduler
+    init: true
     stop_grace_period: 30s
     depends_on:
       postgres:
@@ -388,10 +390,9 @@ services:
       SPARK_MASTER_URL: spark://spark-master:7077
       SPARK_JOBS_DIR: /opt/spark-jobs
       SPARK_EXTRA_JARS: /opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/postgresql-42.7.4.jar
-      SPARK_CLUSTER_DRIVER_MEMORY: 1g
-      SPARK_CLUSTER_ML_DRIVER_MEMORY: 1536m
       DATA_DIR: /opt/airflow/data/raw
       REPORT_EDA_LOCAL: /opt/airflow/data/eda/report
+      MODEL_LOCAL_PATH: /opt/airflow/data/models/rte
       EDF_ENVIRONMENT: dev
       PYTHONPATH: /opt/airflow/project:/opt/airflow/plugins
     env_file:
@@ -402,6 +403,7 @@ services:
       - ./airflow/plugins:/opt/airflow/plugins
       - ./data/raw:/opt/airflow/data/raw:ro
       - ./data/eda:/opt/airflow/data/eda
+      - ./data/models:/opt/airflow/data/models
       - ./rte_pipeline:/opt/airflow/project/rte_pipeline
       - ./spark:/opt/airflow/project/spark
       - ./infra/postgres:/opt/airflow/infra/postgres:ro

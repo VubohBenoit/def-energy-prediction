@@ -74,12 +74,6 @@ def init_postgres_schema(**context) -> dict:
     logger.info("PostgreSQL initialization from %s", schema_path)
     _execute_sql_file(cur, schema_path)
 
-    migrations_dir = schema_path.parent / "migrations"
-    if migrations_dir.is_dir():
-        for mig in sorted(migrations_dir.glob("*.sql")):
-            logger.info("PostgreSQL migration : %s", mig.name)
-            _execute_sql_file(cur, mig)
-
     cur.close()
     conn.close()
     logger.info("PostgreSQL schema ready")

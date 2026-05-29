@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════
--- EDF ETL Platform — Initialisation PostgreSQL
+-- EDF Energy Prediction — Initialisation PostgreSQL
 -- ═══════════════════════════════════════════════════════════════
 -- Executed ONLY ONCE at first container startup
 -- (docker-entrypoint-initdb.d). The DW schema is applied afterwards

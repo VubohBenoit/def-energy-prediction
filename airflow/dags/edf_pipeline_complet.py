@@ -100,21 +100,18 @@ with DAG(
             "run_xls_to_bronze",
             "xls_to_bronze.py",
             ["/opt/spark-data/raw"],
-            execution_timeout=timedelta(hours=2),
         )
 
     with TaskGroup(group_id="silver", tooltip="Bronze -> PostgreSQL Silver") as silver:
         silver_task = spark_job(
             "run_bronze_to_silver",
             "bronze_to_silver.py",
-            execution_timeout=timedelta(hours=2),
         )
 
     with TaskGroup(group_id="gold", tooltip="Daily / monthly aggregations") as gold:
         gold_task = spark_job(
             "run_silver_to_gold",
             "silver_to_gold.py",
-            execution_timeout=timedelta(hours=1),
         )
 
     with TaskGroup(group_id="quality", tooltip="Post-ETL quality checks") as quality:

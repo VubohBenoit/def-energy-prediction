@@ -25,6 +25,10 @@ DAG_ID_ETL_STREAMING: str = "edf_etl_pipeline"
 DAG_ID_ML: str = "edf_ml_pipeline"
 DAG_ID_QUALITY: str = "edf_quality_monitoring"
 
+# Spark cluster pool — one active Spark REST job at a time (professional mode).
+AIRFLOW_SPARK_POOL: str = os.getenv("AIRFLOW_SPARK_POOL", "spark_cluster")
+AIRFLOW_SPARK_POOL_SLOTS: int = int(os.getenv("AIRFLOW_SPARK_POOL_SLOTS", "1"))
+
 DEFAULT_ARGS: dict = {
     "owner": "edf-etl",
     "depends_on_past": False,

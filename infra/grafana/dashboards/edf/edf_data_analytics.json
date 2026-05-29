@@ -313,7 +313,7 @@
   "time": { "from": "now-24h", "to": "now" },
   "timepicker": { "refresh_intervals": ["30s", "1m", "5m", "15m"] },
   "timezone": "browser",
-  "title": "EDF ETL — Analytics & ML",
+  "title": "EDF Energy Prediction — Analytics & ML",
   "uid": "edf-data-analytics",
   "version": 1
 }
