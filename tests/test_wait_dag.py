@@ -44,7 +44,7 @@ def test_parse_trigger_payload_object():
 
 
 def test_parse_trigger_payload_empty_raises():
-    with pytest.raises(RuntimeError, match="Réponse vide"):
+    with pytest.raises(RuntimeError, match="Empty response"):
         _parse_trigger_payload("   ")
 
 

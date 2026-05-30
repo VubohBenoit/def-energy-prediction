@@ -12,7 +12,7 @@ import logging
 import os
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import matplotlib
 
@@ -21,7 +21,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd
 
 from rte_pipeline.parsing.xls import iter_xls_file
-from spark.common.config import DATA_DIR, REPORT_EDA_LOCAL, resolve_model_local_path
+from spark.common.eda_specs import ML_CHART_FILENAMES, DATA_CHART_FILENAMES, all_report_filenames
+from spark.common.config import DATA_DIR, REPORT_EDA_BUCKET, REPORT_EDA_LOCAL, REPORT_EDA_S3_PREFIX, resolve_model_local_path
 from spark.common.eda_style import (
     COLORS,
     HEADER_BOTTOM,
@@ -30,15 +31,15 @@ from spark.common.eda_style import (
     add_report_footer,
     apply_dashboard_style,
     apply_figure_layout,
+    build_consumption_national_figure,
     build_ml_synthesis_figure,
     build_model_comparison_figure,
+    build_monthly_comparison_figure,
     build_predictions_dispersion_figure,
     build_predictions_timeseries_figure,
-    plot_consumption_series,
+    build_quality_diagnostic_figure,
     plot_data_split,
     plot_learning_curve_rf,
-    plot_missing_bars,
-    plot_quality_distribution,
     prepare_time_series,
     save_report_figure,
     human_model_name,
@@ -47,84 +48,56 @@ from spark.common.eda_style import (
     _style_ax_dashboard,
 )
 from spark.common.object_storage import (
-    REPORT_EDA_BUCKET,
     persist_report_file,
     remove_report_from_s3,
     sync_ml_report_artifacts,
     sync_model_artifacts,
+    sync_report_pngs,
 )
 
 logger = logging.getLogger(__name__)
 
 # (titre affiché, nom de fichier PNG)
 DATA_CHART_SPECS: tuple[tuple[str, str], ...] = (
-    ("Consommation électrique nationale", "consommation_electrique_nationale.png"),
-    ("Volume mensuel de consommation", "volume_mensuel_de_consommation.png"),
-    ("Qualité des données source", "qualite_des_donnees_source.png"),
+    ("Impact du nettoyage — Consommation nationale", DATA_CHART_FILENAMES[0]),
+    ("Volume mensuel — brute vs nettoyée", DATA_CHART_FILENAMES[1]),
+    ("Qualité des données — diagnostic avant / après ETL", DATA_CHART_FILENAMES[2]),
 )
 
 ML_CHART_SPECS: tuple[tuple[str, str, str], ...] = (
     (
         "Courbe d'apprentissage – Forêt aléatoire (RMSE vs taille d'entraînement)",
-        "courbe_apprentissage_foret_aleatoire.png",
+        ML_CHART_FILENAMES[0],
         "Entraînement (bleu) vs validation (orange) · axe X logarithmique · trait = meilleur compromis",
     ),
     (
         "Performance des prédictions – Forêt aléatoire (jeu de test)",
-        "predictions_dispersion_reel_vs_predit.png",
+        ML_CHART_FILENAMES[1],
         "Graphique A · nuage de points coloré par |erreur| · bande ±2×RMSE · courbe LOESS",
     ),
     (
         "Performance des prédictions – Forêt aléatoire (jeu de test)",
-        "predictions_serie_temporelle_ecarts.png",
+        ML_CHART_FILENAMES[2],
         "Graphique B · 2 blocs côte à côte (données RTE incomplètes entre les périodes) · MM 6 h · MAE par bloc",
     ),
     (
         "Comparaison des modèles – Validation temporelle (80/20)",
-        "comparaison_des_modeles.png",
+        ML_CHART_FILENAMES[3],
         "RMSE (% du meilleur) + pénalité (1−R²) · palette vert → rouge = rang",
     ),
     (
         "Synthèse de performance ML",
-        "synthese_performance_ml.png",
+        ML_CHART_FILENAMES[4],
         "Tableau comparatif · meilleure valeur en gras par colonne · Δ RMSE % vs forêt aléatoire",
     ),
     (
         "Répartition des données – Split temporel",
-        "repartition_des_donnees.png",
+        ML_CHART_FILENAMES[5],
         "Camembert 80/20 · effectifs et périodes · découpage temporel strict (test = période future)",
     ),
 )
 
 ML_PENDING = "ml_dashboard.pending"
-
-OBSOLETE_CHARTS: tuple[str, ...] = (
-    # anciens noms numérotés — données
-    "01_consommation.png",
-    "02_volume_mensuel.png",
-    "03_qualite_donnees.png",
-    # anciens noms numérotés — ML
-    "04_performance_ml.png",
-    "04_learning_curve_rf.png",
-    "05_learning_curve_rf.png",
-    "05_predictions_scatter.png",
-    "06_predictions_vs_actual.png",
-    "06_predictions_serie.png",
-    "07_r2_comparison.png",
-    "08_rmse_comparison.png",
-    "09_metrics_detail.png",
-    "10_best_model.png",
-    "11_repartition_donnees.png",
-    "04_performance_ml.pending",
-    # graphiques ML éclatés (remplacés par figures combinées)
-    "performance_des_predictions.png",
-    "predictions_vs_consommation_reelle.png",
-    "serie_temporelle_jeu_de_test.png",
-    "comparaison_r2.png",
-    "comparaison_rmse.png",
-    "metriques_detaillees.png",
-    "modele_retenu.png",
-)
 
 KEY_NUMERIC = [
     "consumption_mw",
@@ -173,7 +146,23 @@ def report_output_dir() -> Path:
 
 def report_destination_label(out: Path | None = None) -> str:
     out = out or report_output_dir()
-    return f"{out}/ + s3a://{REPORT_EDA_BUCKET}/"
+    prefix = REPORT_EDA_S3_PREFIX.strip("/")
+    s3_path = f"{prefix}/" if prefix else ""
+    return f"{out}/ + s3a://{REPORT_EDA_BUCKET}/{s3_path}"
+
+
+def sync_report_charts_to_minio(out: Path | None = None) -> list[str]:
+    """Pousse vers MinIO tous les PNG EDA présents localement (filet de sécurité)."""
+    out = out or report_output_dir()
+    uploaded = sync_report_pngs(out, all_report_filenames())
+    if uploaded:
+        logger.info(
+            "%d PNG synchronisé(s) → s3a://%s/%s",
+            len(uploaded),
+            REPORT_EDA_BUCKET,
+            REPORT_EDA_S3_PREFIX.strip("/") or "",
+        )
+    return uploaded
 
 
 def load_bronze_sample() -> pd.DataFrame:
@@ -200,25 +189,61 @@ def load_bronze_sample() -> pd.DataFrame:
     return df.dropna(subset=["datetime"]).sort_values("datetime")
 
 
-def compute_quality_score(df: pd.DataFrame) -> pd.Series:
-    cols = [c for c in KEY_NUMERIC if c in df.columns]
-    if not cols:
-        return pd.Series(dtype=float)
-    return df[cols].notna().sum(axis=1) / len(cols)
+def load_silver_sample(raw_df: pd.DataFrame | None = None) -> pd.DataFrame | None:
+    """Charge la couche Silver depuis PostgreSQL (dw.fact_consumption_silver)."""
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning("psycopg2 unavailable — Silver comparison skipped")
+        return None
 
+    cols = [
+        "datetime",
+        "consumption_mw",
+        "nuclear_mw",
+        "wind_mw",
+        "solar_mw",
+        "hydro_mw",
+        "gas_mw",
+        "coal_mw",
+        "fuel_mw",
+        "bioenergy_mw",
+        "co2_rate",
+        "is_interpolated",
+        "quality_score",
+    ]
+    sql = f"""
+        SELECT {", ".join(cols)}
+        FROM dw.fact_consumption_silver
+        WHERE 1=1
+    """
+    params: list[Any] = []
+    if raw_df is not None and not raw_df.empty:
+        dt = pd.to_datetime(raw_df["datetime"], errors="coerce", utc=True).dropna()
+        if not dt.empty:
+            sql += " AND datetime >= %s AND datetime <= %s"
+            params.extend([dt.min().to_pydatetime(), dt.max().to_pydatetime()])
+    sql += " ORDER BY datetime"
 
-def build_monthly(df: pd.DataFrame) -> pd.DataFrame:
-    monthly = (
-        df.set_index("datetime")
-        .resample("MS")["consumption_mw"]
-        .mean()
-        .dropna()
-        .reset_index()
-    )
-    hours = monthly["datetime"].dt.days_in_month * 24
-    monthly["consumption_total_twh"] = monthly["consumption_mw"] * hours / 1_000_000
-    monthly["label"] = monthly["datetime"].dt.strftime("%Y-%m")
-    return monthly
+    try:
+        conn = psycopg2.connect(postgres_dsn())
+        df = pd.read_sql(sql, conn, params=params or None)
+        conn.close()
+    except Exception as exc:
+        logger.warning("Silver load failed (%s) — charts will show raw only", exc)
+        return None
+
+    if df.empty:
+        logger.warning("Silver table empty — run make run-etl first")
+        return None
+
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+    for col in KEY_NUMERIC:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "quality_score" in df.columns:
+        df["quality_score"] = pd.to_numeric(df["quality_score"], errors="coerce")
+    return df.dropna(subset=["datetime"]).sort_values("datetime")
 
 
 def load_ml_metrics() -> tuple[pd.DataFrame, str | None, str | None] | None:
@@ -406,102 +431,49 @@ def _save_dashboard_figure(
     return save_report_figure(fig, str(out / filename))
 
 
-def chart_consumption(df: pd.DataFrame, out: Path) -> str:
-    ts = prepare_time_series(df, "datetime", "consumption_mw")
-    fig, ax = plt.subplots(figsize=(12, 5.8))
-    plot_consumption_series(
-        ax,
-        ts,
-        "datetime",
-        "consumption_mw",
-        ma_days=7,
+def chart_consumption(df_raw: pd.DataFrame, out: Path, df_silver: pd.DataFrame | None = None) -> str:
+    ts_raw = prepare_time_series(df_raw, "datetime", "consumption_mw")
+    ts_silver = (
+        prepare_time_series(df_silver, "datetime", "consumption_mw")
+        if df_silver is not None and not df_silver.empty
+        else None
     )
+    fig, note = build_consumption_national_figure(ts_raw, ts_silver=ts_silver)
+    subtitle = note or "Courbes superposées brute vs Silver · écarts colorés par type de correction"
+    if df_silver is None or df_silver.empty:
+        subtitle = f"{subtitle} · Silver indisponible — exécutez make run-etl".strip(" ·")
     add_accent_bar(fig)
-    add_chart_header(
-        fig,
-        DATA_CHART_SPECS[0][0],
-        subtitle="Série horaire RTE éco2mix — tendance lissée sur 7 jours",
-    )
+    add_chart_header(fig, DATA_CHART_SPECS[0][0], subtitle=subtitle)
     add_report_footer(fig)
-    apply_figure_layout(fig)
     return save_report_figure(fig, str(out / DATA_CHART_SPECS[0][1]))
 
 
-def chart_monthly(monthly: pd.DataFrame, out: Path) -> str:
-    fig, ax = plt.subplots(figsize=(12, 5.8))
-    if monthly.empty:
-        ax.text(
-            0.5,
-            0.5,
-            "Données mensuelles indisponibles",
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-        )
-    else:
-        _style_ax_dashboard(ax)
-        m = monthly.sort_values("datetime")
-        ax.bar(
-            m["label"],
-            m["consumption_total_twh"],
-            color=COLORS["secondary"],
-            width=0.72,
-            alpha=0.82,
-            edgecolor="white",
-            linewidth=0.6,
-        )
-        ax.plot(
-            m["label"],
-            m["consumption_total_twh"],
-            color=COLORS["primary"],
-            marker="o",
-            markersize=5,
-            linewidth=1.8,
-            markerfacecolor="white",
-            markeredgewidth=1.5,
-        )
-        ax.set_xlabel("Mois")
-        ax.set_ylabel("Énergie (TWh)")
-        step = max(1, len(m) // 12)
-        ax.set_xticks(range(0, len(m), step))
-        ax.set_xticklabels(m["label"].iloc[::step], rotation=45, ha="right")
+def chart_monthly(df_raw: pd.DataFrame, out: Path, df_silver: pd.DataFrame | None = None) -> str:
+    fig, note = build_monthly_comparison_figure(df_raw, df_silver)
+    subtitle = note or "Agrégats mensuels TWh — barres groupées brute vs Silver"
+    if df_silver is None or df_silver.empty:
+        subtitle = f"{subtitle} · Silver indisponible".strip(" ·")
     add_accent_bar(fig)
-    add_chart_header(
-        fig,
-        DATA_CHART_SPECS[1][0],
-        subtitle="Volume mensuel agrégé à partir des mesures horaires",
-    )
+    add_chart_header(fig, DATA_CHART_SPECS[1][0], subtitle=subtitle)
     add_report_footer(fig)
-    apply_figure_layout(fig)
     return save_report_figure(fig, str(out / DATA_CHART_SPECS[1][1]))
 
 
-def chart_quality(df: pd.DataFrame, out: Path) -> str:
-    missing = (df.isna().mean() * 100).sort_values(ascending=False)
-    scores = compute_quality_score(df)
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.8))
-    plot_missing_bars(axes[0], missing, title="Variables les plus incomplètes", top_n=8)
-    plot_quality_distribution(
-        axes[1], scores, title="Score de qualité des enregistrements"
-    )
+def chart_quality(
+    df_raw: pd.DataFrame,
+    out: Path,
+    df_silver: pd.DataFrame | None = None,
+) -> str:
+    cols = [c for c in KEY_NUMERIC if c in df_raw.columns]
+    fig, note = build_quality_diagnostic_figure(df_raw, cols, df_silver)
+    subtitle = note or "Dashboard 4 quadrants — complétude, anomalies, distribution, statistiques"
     add_accent_bar(fig)
-    add_chart_header(
-        fig,
-        DATA_CHART_SPECS[2][0],
-        subtitle="Complétude des champs et distribution du score qualité (0 = faible, 1 = excellent)",
-    )
+    add_chart_header(fig, DATA_CHART_SPECS[2][0], subtitle=subtitle)
     add_report_footer(fig)
-    apply_figure_layout(fig)
     return save_report_figure(fig, str(out / DATA_CHART_SPECS[2][1]))
 
 
-def _cleanup_obsolete_charts(out: Path) -> None:
-    for name in OBSOLETE_CHARTS:
-        path = out / name
-        if path.exists():
-            path.unlink()
-        remove_report_from_s3(name)
+def _remove_ml_pending(out: Path) -> None:
     pending = out / ML_PENDING
     if pending.exists():
         pending.unlink()
@@ -552,7 +524,6 @@ def mark_ml_pending(out: Path | None = None) -> None:
         if path.exists():
             path.unlink()
         remove_report_from_s3(name)
-    _cleanup_obsolete_charts(out)
     pending = out / ML_PENDING
     pending.write_text(
         "Dashboard ML en attente.\n"
@@ -562,23 +533,42 @@ def mark_ml_pending(out: Path | None = None) -> None:
     )
 
 
+def _generate_and_persist_chart(label: str, builder: Callable[[], str]) -> str | None:
+    """Génère un PNG puis l'envoie sur MinIO ; n'interrompt pas les autres graphiques."""
+    try:
+        path = builder()
+        _persist_chart(path)
+        return path
+    except Exception as exc:
+        logger.exception("Échec graphique %s : %s", label, exc)
+        return None
+
+
 def generate_data_charts(out: Path | None = None) -> list[str]:
     out = out or report_output_dir()
     apply_dashboard_style()
-    _cleanup_obsolete_charts(out)
 
     logger.info("Loading RTE from %s", raw_data_dir())
-    df = load_bronze_sample()
-    monthly = build_monthly(df)
+    df_raw = load_bronze_sample()
+    df_silver = load_silver_sample(df_raw)
+    if df_silver is not None:
+        logger.info("Silver loaded: %d rows for comparison", len(df_silver))
+    else:
+        logger.warning("Silver unavailable — data charts show raw source only (run make run-etl)")
 
-    paths = [
-        chart_consumption(df, out),
-        chart_monthly(monthly, out),
-        chart_quality(df, out),
+    builders: list[tuple[str, Callable[..., str]]] = [
+        ("consommation", lambda: chart_consumption(df_raw, out, df_silver)),
+        ("mensuel", lambda: chart_monthly(df_raw, out, df_silver)),
+        ("qualité", lambda: chart_quality(df_raw, out, df_silver)),
     ]
+    paths: list[str] = []
+    for label, builder in builders:
+        path = _generate_and_persist_chart(label, builder)
+        if path:
+            paths.append(path)
+
     logger.info("%d data chart(s) -> %s", len(paths), report_destination_label(out))
-    for path in paths:
-        _persist_chart(path)
+    sync_report_charts_to_minio(out)
     return paths
 
 
@@ -605,15 +595,15 @@ def generate_ml_charts(
     split_info = artifacts.get("split_info") or {"n_train": 0, "n_test": 0}
     best_model = str(metrics.sort_values("rmse").iloc[0]["model_name"])
 
-    _cleanup_obsolete_charts(out)
+    _remove_ml_pending(out)
 
-    paths: list[str] = [
-        chart_model_comparison(metrics, out),
-        chart_ml_synthesis(metrics, out, best_model=best_model),
+    ml_builders: list[tuple[str, Callable[[], str]]] = [
+        ("comparaison_modèles", lambda: chart_model_comparison(metrics, out)),
+        ("synthèse_ml", lambda: chart_ml_synthesis(metrics, out, best_model=best_model)),
     ]
 
     if not curve.empty:
-        paths.insert(0, chart_learning_curve(curve, out))
+        ml_builders.insert(0, ("courbe_apprentissage", lambda: chart_learning_curve(curve, out)))
     else:
         logger.warning(
             "Artefact courbe d'apprentissage absent (%s) — relancez make run-gold-to-model",
@@ -622,8 +612,8 @@ def generate_ml_charts(
 
     if not preds.empty:
         insert_at = 1 if not curve.empty else 0
-        paths.insert(insert_at, chart_predictions_dispersion(preds, out))
-        paths.insert(insert_at + 1, chart_predictions_timeseries(preds, out))
+        ml_builders.insert(insert_at, ("dispersion", lambda: chart_predictions_dispersion(preds, out)))
+        ml_builders.insert(insert_at + 1, ("série_temporelle", lambda: chart_predictions_timeseries(preds, out)))
     else:
         logger.warning(
             "Artefact prédictions absent (%s, %s) — relancez make run-gold-to-model",
@@ -632,9 +622,14 @@ def generate_ml_charts(
         )
 
     if split_info.get("n_train") or split_info.get("n_test"):
-        paths.append(chart_data_split(split_info, out))
+        ml_builders.append(("répartition_données", lambda: chart_data_split(split_info, out)))
+
+    paths: list[str] = []
+    for label, builder in ml_builders:
+        path = _generate_and_persist_chart(label, builder)
+        if path:
+            paths.append(path)
 
     logger.info("ML dashboard — %d tile(s), best model: %s", len(paths), best_model)
-    for path in paths:
-        _persist_chart(path)
+    sync_report_charts_to_minio(out)
     return paths

@@ -284,6 +284,30 @@ def _check_passed(value: float, operator: str, threshold: float) -> bool:
     raise ValueError(f"Unsupported operator: {operator}")
 
 
+def _silver_year_coverage(cur: Any) -> dict[str, Any]:
+    """Années présentes en Silver et trous entre min/max."""
+    cur.execute(
+        """
+        SELECT ARRAY_AGG(DISTINCT year ORDER BY year)
+        FROM dw.fact_consumption_silver
+        WHERE year IS NOT NULL
+        """
+    )
+    row_years = cur.fetchone()[0] or []
+    year_set = {int(y) for y in row_years}
+    gaps = find_year_gaps(year_set)
+    return {
+        "years_present": sorted(year_set),
+        "missing_years": gaps,
+        "human_detail": (
+            f"Année(s) manquante(s) : {gaps} "
+            f"(présentes : {sorted(year_set)} — ajoutez un export RTE couvrant la période)"
+            if gaps
+            else "Couverture annuelle continue"
+        ),
+    }
+
+
 def run_checks(
     checks: list[dict[str, Any]],
     *,
@@ -330,6 +354,9 @@ def run_checks(
                 "operator": op,
                 "passed": passed,
             }
+            if name == "year_coverage_gaps":
+                result.update(_silver_year_coverage(cur))
+
             results.append(result)
 
             status = "PASS" if passed else ("CRIT" if severity == "critical" else "WARN")

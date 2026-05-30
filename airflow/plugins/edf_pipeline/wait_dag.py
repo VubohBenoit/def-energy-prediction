@@ -4,6 +4,7 @@
 # =======================================================================
 #
 # airflow/plugins/edf_pipeline/wait_dag.py — Trigger and wait for an Airflow DAG (Makefile = prod).
+# Parsing JSON (sans Airflow) testable via ``make test`` hors conteneur.
 # =======================================================================
 
 from __future__ import annotations
@@ -14,11 +15,6 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
-
-from airflow.models import DagModel, TaskInstance, DagRun
-from airflow.utils.session import create_session
-from airflow.utils.state import State
-from airflow.configuration import conf
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +75,8 @@ def _run_id_from_trigger_payload(payload: dict[str, Any]) -> str:
 
 def ensure_dag_unpaused(dag_id: str) -> bool:
     """Unpause the DAG if necessary (Airflow creates DAGs in pause by default)."""
+    from airflow.models import DagModel
+    from airflow.utils.session import create_session
 
     with create_session() as session:
         dag_model = (
@@ -99,6 +97,9 @@ def ensure_dag_unpaused(dag_id: str) -> bool:
 
 def is_dag_paused(dag_id: str) -> bool:
     """Check if the DAG is paused."""
+    from airflow.models import DagModel
+    from airflow.utils.session import create_session
+
     with create_session() as session:
         dag_model = (
             session.query(DagModel).filter(DagModel.dag_id == dag_id).one_or_none()
@@ -108,6 +109,9 @@ def is_dag_paused(dag_id: str) -> bool:
 
 def fail_blocking_runs(dag_id: str) -> int:
     """Mark the runs ``queued``/``running`` as failed before a new trigger."""
+    from airflow.models import DagRun
+    from airflow.utils.session import create_session
+    from airflow.utils.state import State
 
     with create_session() as session:
         runs = (
@@ -133,6 +137,9 @@ def fail_blocking_runs(dag_id: str) -> int:
 
 def _blocking_run_id(dag_id: str, run_id: str) -> str | None:
     """Return another run ``running`` that blocks ``max_active_runs=1``."""
+    from airflow.models import DagRun
+    from airflow.utils.session import create_session
+    from airflow.utils.state import State
 
     with create_session() as session:
         blocker = (
@@ -167,6 +174,7 @@ def trigger_dag(dag_id: str) -> str:
 
 def _task_log_paths(ti: Any) -> list[Path]:
     """Log file paths (last attempt first)."""
+    from airflow.configuration import conf
 
     base = conf.get("logging", "base_log_folder")
     if not base:
@@ -205,7 +213,10 @@ def _error_line_from_log(path: Path) -> str | None:
 
 def _failed_task_summary(dag_id: str, run_id: str) -> str:
     """Extract the failed task and an excerpt from the Airflow log."""
-    
+    from airflow.models import TaskInstance
+    from airflow.utils.session import create_session
+    from airflow.utils.state import State
+
     with create_session() as session:
         ti = (
             session.query(TaskInstance)
@@ -238,6 +249,8 @@ def wait_for_dag_run(
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
 ) -> dict[str, str]:
     """Wait for the end of a ``DagRun`` (success or failed)."""
+    from airflow.models import DagRun
+    from airflow.utils.session import create_session
 
     deadline = time.time() + timeout_sec
     last_state = "unknown"

@@ -431,8 +431,64 @@
       "gridPos": { "h": 9, "w": 10, "x": 14, "y": 33 },
       "id": 33,
       "options": { "cellHeight": "sm", "showHeader": true, "sortBy": [{ "desc": true, "displayName": "checked_at" }] },
-      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT checked_at, check_name, table_name, passed, actual_value, expected_value, LEFT(COALESCE(detail, ''), 80) AS detail FROM etl.data_quality_checks ORDER BY checked_at DESC LIMIT 20", "refId": "A" }],
+      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT checked_at, check_name, table_name, passed, actual_value, expected_value, CASE WHEN check_name = 'year_coverage_gaps' AND NOT passed THEN 'Silver: ' || COALESCE((SELECT string_agg(DISTINCT year::text, ', ' ORDER BY year::text) FROM dw.fact_consumption_silver WHERE year IS NOT NULL), '(vide)') || ' — année(s) manquante(s) entre min et max (ajoutez export RTE ex. Annuel-Definitif 2025)' ELSE COALESCE(CASE WHEN detail LIKE '{%' THEN (detail::jsonb)->>'human_detail' END, LEFT(COALESCE(detail, ''), 120)) END AS detail FROM etl.data_quality_checks ORDER BY checked_at DESC LIMIT 20", "refId": "A" }],
       "title": "Contrôles qualité récents",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "id": 120,
+      "title": "Machine Learning — dernier run",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "edf-postgres" },
+      "description": "Modèle avec le RMSE le plus bas sur le dernier run enregistré dans etl.model_metrics.",
+      "fieldConfig": { "defaults": { "unit": "none", "noValue": "— (lancer make run-ml)" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 43 },
+      "id": 121,
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^metric$/", "values": false } },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT model_name AS metric FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC NULLS LAST LIMIT 1) ORDER BY rmse ASC NULLS LAST LIMIT 1", "refId": "A" }],
+      "title": "Meilleur modèle",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "edf-postgres" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "short", "decimals": 1, "noValue": "—" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 43 },
+      "id": 122,
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^metric$/", "values": false } },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT ROUND(MIN(rmse)::numeric, 1)::double precision AS metric FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC NULLS LAST LIMIT 1)", "refId": "A" }],
+      "title": "RMSE minimal (MW)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "edf-postgres" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 3, "noValue": "—" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 43 },
+      "id": 123,
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^metric$/", "values": false } },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT ROUND(MAX(r2)::numeric, 4)::double precision AS metric FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC NULLS LAST LIMIT 1)", "refId": "A" }],
+      "title": "R² max",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "edf-postgres" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } }, "decimals": 2 },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "rmse" },
+            "properties": [{ "id": "displayName", "value": "RMSE (MW)" }]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 47 },
+      "id": 124,
+      "options": { "cellHeight": "sm", "showHeader": true, "sortBy": [{ "desc": false, "displayName": "rmse" }] },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT model_name, ROUND(rmse::numeric, 1) AS rmse, ROUND(mae::numeric, 1) AS mae, ROUND(r2::numeric, 4) AS r2, trained_at FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC NULLS LAST LIMIT 1) ORDER BY rmse ASC NULLS LAST", "refId": "A" }],
+      "title": "Benchmark modèles — dernier run ML",
       "type": "table"
     }
   ],

@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 from spark.common.config import (
+    MINIO_ENDPOINT,
     MODEL_PATH,
     REPORT_EDA_BUCKET,
     REPORT_EDA_S3_PREFIX,
@@ -24,15 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 def minio_endpoint() -> str:
-    """Returns the MinIO endpoint"""
-    ep = os.getenv("MINIO_ENDPOINT", "http://localhost:9000")
-    if "localhost" in ep or "127.0.0.1" in ep:
+    """Endpoint S3/MinIO.
+
+    - Dans Airflow Docker : ``http://minio:9000`` (service compose).
+    - En CLI hôte : bascule sur ``localhost`` si ``minio`` ne résout pas.
+    """
+    ep = os.getenv("MINIO_ENDPOINT", MINIO_ENDPOINT).strip()
+    if "minio:" not in ep:
         return ep
-    if ep.startswith("http://minio:"):
-        return ep.replace("http://minio:", "http://localhost:")
-    if ep.startswith("https://minio:"):
-        return ep.replace("https://minio:", "https://localhost:")
-    return ep
+    try:
+        import socket
+
+        socket.getaddrinfo("minio", 9000, type=socket.SOCK_STREAM)
+        return ep
+    except OSError:
+        return ep.replace("://minio:", "://localhost:")
 
 
 def minio_credentials() -> tuple[str, str]:
@@ -107,6 +114,21 @@ def persist_report_file(local_path: Path | str) -> str | None:
 def remove_report_from_s3(filename: str) -> None:
     """Removes a report file from MinIO"""
     delete_object(REPORT_EDA_BUCKET, report_s3_key(filename))
+
+
+def sync_report_pngs(local_dir: Path | str, filenames: list[str]) -> list[str]:
+    """Upload les PNG listés depuis un répertoire local vers MinIO rapport-eda."""
+    root = Path(local_dir)
+    uploaded: list[str] = []
+    for name in filenames:
+        path = root / name
+        if not path.is_file():
+            continue
+        uri = persist_report_file(path)
+        if uri:
+            uploaded.append(uri)
+            logger.info("MinIO sync OK : %s", uri)
+    return uploaded
 
 
 def sync_s3_prefix_to_local(s3_uri: str, local_dir: Path | str) -> int:

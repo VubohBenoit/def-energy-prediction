@@ -82,7 +82,7 @@ Plateforme de **data engineering** et **machine learning** pour les données **R
 | `edf-silver` | Couche nettoyée et enrichie |
 | `edf-gold` | Agrégats analytiques |
 | `models` | Artefacts Spark ML (`rte/`, `rte/best/`) |
-| `rapport-eda` | Graphiques du rapport professionnel (`*.png` à la racine du bucket) |
+| `rapport-eda` | Graphiques du rapport professionnel (`report/*.png` — préfixe `REPORT_EDA_S3_PREFIX`) |
 
 ### Stack technique
 
@@ -175,18 +175,27 @@ Les couches Silver, Gold et ML partagent le même code Spark, quel que soit le c
 
 ### Commandes Makefile
 
+Liste complète et à jour : **`make help`** (groupé par section).
+
 | Commande | Description |
 |----------|-------------|
 | `make bootstrap` | Build, stack, Kafka, schéma PostgreSQL |
 | `make pipeline` | Attente du DAG `edf_pipeline_complet` (EDA inclus) + `ml-metrics` |
 | `make pipeline-spark` | ETL + ML via Spark REST (sans Airflow) + rapports CLI |
+| `make reset-zero` | Purge locale + volumes Docker — puis relancer `make bootstrap` |
 | `make run-etl` | Jobs 1→3, contrôles qualité, rapport données (3 PNG) |
 | `make run-ml` | Job 4, tuiles ML dashboard (jusqu'à 6 PNG) |
+| `make validate-xls-sources` | Contrôles XLS avant Bronze (plages, trous d'années) |
+| `make run-quality-checks` | Contrôles qualité Silver/Gold (post-ETL, bloquant si critique) |
+| `make check-ml-readiness` | Seuil `ML_MIN_TRAINING_ROWS` avant entraînement ML |
 | `make report-eda` | Rapport complet en CLI locale (relance manuelle) |
 | `make report-eda-data` | 3 graphiques données (XLS) en CLI locale |
 | `make report-eda-ml` | Tuiles ML dashboard en CLI locale (après entraînement ML) |
+| `make sync-report-eda-minio` | Pousser les PNG locaux `data/eda/report/` → MinIO `rapport-eda` |
+| `make purge-local` | Caches Python, logs Airflow, PNG EDA/ML locaux (sans volumes Docker) |
 | `make sync-models-local` | Télécharge `models/` MinIO → `data/models/rte/` |
 | `make ml-metrics` | Affiche les dernières métriques PostgreSQL |
+| `make trigger-pipeline-wait` | Déclenche `edf_pipeline_complet` et attend la fin |
 | `make trigger-pipeline` | Déclenche `edf_pipeline_complet` sans attendre |
 | `make health` | Contrôle de santé des services |
 | `make urls` | URLs et identifiants des interfaces |
@@ -295,13 +304,17 @@ Interface : [http://localhost:8081](http://localhost:8081) — identifiants `adm
 
 Les graphiques sont persistés dans **`./data/eda/report/`** (volume Docker monté côté Airflow) et dans le bucket MinIO **`rapport-eda`**.
 
-**Données (3 PNG — toujours générés si les XLS sont présents) :**
+**Données (3 PNG — comparaison source brute XLS vs couche Silver ETL, uniquement si l'ETL a été exécuté) :**
 
 | Fichier | Contenu |
 |---------|---------|
-| `consommation_electrique_nationale.png` | Série horaire + moyenne mobile 7 j |
-| `volume_mensuel_de_consommation.png` | Volume mensuel (TWh) |
-| `qualite_des_donnees_source.png` | Complétude et score qualité |
+| `consommation_electrique_nationale.png` | Courbe brute (gris, pointillés) vs nettoyée (bleu) · outliers marqués · zones de trous · barres d'écart journalier colorées (inchangé / imputation / anomalie supprimée) |
+| `volume_mensuel_de_consommation.png` | Barres groupées TWh par mois (brut vs Silver) · tendance sur Silver · % d'écart · tableau récap du mois le plus impacté |
+| `qualite_des_donnees_source.png` | Dashboard 4 quadrants : complétude avant/après · heatmaps d'anomalies · histogrammes/KDE consommation · tableau statistique (μ, σ, min/max, outliers) |
+
+La couche **Silver** est lue **uniquement** depuis `dw.fact_consumption_silver` (PostgreSQL) sur la même fenêtre temporelle que les XLS. **Aucune valeur simulée** : si l'ETL n'a pas été exécuté, seule la source brute est affichée (message dans le sous-titre).
+
+Convention visuelle : **gris = données brutes (source XLS)** · **bleu = données nettoyées (Silver ETL)** · **barres d'écart** : vert = inchangé, bleu = correction mineure, orange = correction majeure, rouge = anomalie supprimée.
 
 **ML dashboard (jusqu'à 6 PNG — après entraînement + `etl.model_metrics`) :**
 
@@ -316,8 +329,6 @@ Les graphiques sont persistés dans **`./data/eda/report/`** (volume Docker mont
 
 Les tuiles courbe d'apprentissage et prédictions nécessitent les artefacts dans `data/models/rte/_report/` (`learning_curve.parquet`, `predictions.parquet`). Sans entraînement ML, les tuiles ML ne sont pas produites ; un fichier `ml_dashboard.pending` est créé.
 
-> **Note :** l'ancien fichier combiné `performance_des_predictions.png` est obsolète et supprimé automatiquement à la régénération.
-
 **Modèle & artefacts ML :** entraînement → `s3a://models/rte/best/` + miroir `data/models/rte/best/` ; artefacts rapport (`predictions.parquet`, `learning_curve.parquet`, `split_summary.json`) sous `data/models/rte/_report/`.
 
 ```bash
@@ -331,6 +342,7 @@ make pipeline-spark
 make report-eda-data
 make report-eda-ml      # nécessite etl.model_metrics
 make report-eda         # complet
+make sync-report-eda-minio   # rattrapage MinIO si PNG déjà générés en local
 ```
 
 ### Modèles ML
@@ -432,6 +444,7 @@ Fichier `.env` à la racine, chargé par Docker Compose, Airflow et les scripts 
 | `ML_MODEL_PATH` | `s3a://models/rte/` | Modèles ML sur MinIO |
 | `MODEL_LOCAL_PATH` | `data/models/rte` (hôte) | Miroir local des modèles |
 | `REPORT_EDA_BUCKET` | `rapport-eda` | Bucket PNG du rapport EDA |
+| `REPORT_EDA_S3_PREFIX` | `report/` | Préfixe objet MinIO (ex. `report/consommation_….png`) |
 | `REPORT_EDA_LOCAL` | `data/eda/report` | Chemin local hôte ; Airflow : `/opt/airflow/data/eda/report` |
 | `DATA_DIR` | `data/raw` (CLI hôte, via `make report-eda*`) ; `/opt/airflow/data/raw` (Airflow) ; défaut code sans env : `/opt/airflow/data` | Répertoire des fichiers XLS RTE (`eCO2mix*.xls`, hors `tempo`) |
 | `EDA_FAIL_PIPELINE` | `false` | Si `true`, échec rapport EDA = échec DAG |
@@ -509,12 +522,14 @@ Schéma source : `infra/postgres/schema_dw.sql`.
 
 ## Tests
 
+Les tests sont **unitaires** : aucun service Docker (PostgreSQL, MinIO, Airflow, Spark) n'est requis.
+
 ```bash
 make dev-venv   # première fois : venv isolé (recommandé macOS)
-make test       # suite pytest
+make test       # suite pytest (hors conteneur)
 ```
 
-Couverture : parsing XLS RTE, contrôles qualité, planification dev/prod, sérialisation Parquet.
+Couverture : parsing XLS RTE, contrôles qualité, planification dev/prod, sérialisation Parquet, parsing trigger Airflow (JSON uniquement — sans scheduler).
 
 **macOS — erreur `Floating-point exception` :** utiliser le venv projet (`make dev-venv`) plutôt qu'un Python système avec des wheels numpy/pyarrow incompatibles.
 
@@ -528,7 +543,7 @@ edf-etl-platform/
 │   ├── dags/                    # DAGs Airflow
 │   └── plugins/edf_pipeline/    # Tâches, qualité, Spark REST, eda_report, audit
 ├── spark/
-│   ├── common/                  # config, session, object_storage, eda_style, eda_report
+│   ├── common/                  # config, session, object_storage, eda_style, eda_report, eda_specs
 │   ├── transform/               # Logique médaillon
 │   ├── ml/                      # training, metrics_store
 │   └── jobs/                    # Orchestrateurs (xls_to_bronze, …)
@@ -572,6 +587,12 @@ make report-eda-ml      # nécessite des métriques dans etl.model_metrics
 
 **Via Airflow :** relancer uniquement les tâches `reporting.generate_eda_data_report` et/ou `reporting.generate_eda_ml_report` depuis l'UI (Clear → Downstream).
 
+**Rattrapage MinIO** (PNG déjà présents en local) :
+
+```bash
+make sync-report-eda-minio
+```
+
 ### Après modification du plugin Airflow ou des DAGs
 
 ```bash
@@ -585,10 +606,25 @@ docker compose restart airflow-scheduler airflow-webserver
 make sync-models-local
 ```
 
-### Réinitialisation complète
+### Réinitialisation
+
+**Local uniquement** (caches, logs, PNG générés — conserve les XLS et les volumes Docker) :
 
 ```bash
-make clean      # arrêt + suppression des volumes Docker
+make purge-local
+```
+
+**Stack Docker complète** (arrêt + suppression des volumes MinIO/PostgreSQL) :
+
+```bash
+make clean
+make bootstrap
+```
+
+**Tout en une commande** (purge locale + volumes Docker) :
+
+```bash
+make reset-zero
 make bootstrap
 ```
 

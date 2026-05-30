@@ -33,7 +33,8 @@
 # 	make report-eda-ml        Tuiles ML dashboard (après pipeline ML)
 # 	make logs                 Afficher les logs des conteneurs
 # 	make test                 Exécuter les tests
-# 	make clean                Nettoyer les fichiers temporaires
+# 	make purge-local         Caches + artefacts locaux (garde XLS + Docker)
+# 	make reset-zero            Purge locale + volumes Docker (from scratch)
 # 	make shell-airflow        Console Airflow
 # 	make shell-spark          Console Spark
 # 	make shell-postgres       Console PostgreSQL
@@ -175,8 +176,8 @@ endef
         run-gold-to-model \
         run-etl run-ml \
         init-data-dirs trigger-dag trigger-pipeline trigger-pipeline-wait \
-        report-eda report-eda-data report-eda-ml sync-models-local ml-metrics logs \
-        test clean shell-airflow shell-spark shell-postgres
+        report-eda report-eda-data report-eda-ml sync-report-eda-minio sync-models-local ml-metrics logs \
+        test purge-local reset-zero clean shell-airflow shell-spark shell-postgres help-section
 
 # =======================================================================
 # AIDE & WORKFLOW PRINCIPAL
@@ -187,31 +188,25 @@ help: ## Afficher l'aide et le parcours d'exécution
 	@printf "$(BLUE)Parcours standard$(NC)\n"
 	@printf "  1. cp eCO2mix_RTE_*.xls ./data/raw/\n"
 	@printf "  2. make bootstrap\n"
-	@printf "  3. make health             # Contrôle de santé des services critiques\n"
+	@printf "  3. make health\n"
 	@printf "  4. make pipeline           # Airflow prod-like (qualité + ETL + ML)\n"
 	@printf "     make pipeline-spark     # Spark direct (debug rapide)\n\n"
-	@printf "$(BLUE)Pipelines Spark (étape par étape)$(NC)\n"
-	@printf "  make run-xls-to-bronze      Job 1 — ingestion XLS → MinIO Bronze\n"
-	@printf "  make run-bronze-to-silver   Job 2 — nettoyage + features → Silver\n"
-	@printf "  make run-silver-to-gold     Job 3 — agrégats → Gold\n"
-	@printf "  make run-gold-to-model      Job 4 — entraînement ML (4 modèles)\n"
-	@printf "  make run-etl                Jobs 1→3 + contrôles qualité\n"
-	@printf "  make validate-xls-sources   Trous d'années / plages XLS (pré-Bronze)\n"
-	@printf "  make run-quality-checks     Contrôles Silver/Gold (post-ETL)\n"
-	@printf "  make check-ml-readiness     Seuil ML_MIN_TRAINING_ROWS avant ML\n"
-	@printf "  make run-ml                 Job 4 uniquement\n"
-	@printf "  make pipeline-spark         ETL Spark direct + qualité + ML\n\n"
-	@printf "$(BLUE)Airflow$(NC) — $(URL_AIRFLOW) (admin / admin123)\n"
-	@printf "  make pipeline                      # = trigger-pipeline-wait + ml-metrics (EDA dans le DAG)\n"
-	@printf "  make trigger-pipeline-wait         # edf_pipeline_complet + attente\n"
-	@printf "  make trigger-pipeline              # déclenche sans attendre\n"
-	@printf "  make trigger-dag DAG=edf_pipeline_complet\n"
-	@printf "  make trigger-dag DAG=edf_etl_pipeline\n"
-	@printf "  make trigger-dag DAG=edf_ml_pipeline\n"
-	@printf "  make trigger-dag DAG=edf_quality_monitoring\n\n"
-	@printf "$(BLUE)Commandes disponibles$(NC)\n"
-	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | \
-		awk 'BEGIN {FS = ":.*?## "}; {printf "  $(YELLOW)%-24s$(NC) %s\n", $$1, $$2}'
+	@printf "$(BLUE)Commandes$(NC) — $(CYAN)make help$(NC) pour cette liste complète\n"
+	@$(MAKE) --no-print-directory help-section SECTION="Workflow" FILTER='^(bootstrap|pipeline|pipeline-spark|reset-zero)$$'
+	@$(MAKE) --no-print-directory help-section SECTION="Infrastructure Docker" FILTER='^(build|up|down|down-force|restart|restart-airflow|restart-spark|status|health|clean|urls|init-data-dirs|init-kafka|init-postgres-schema|ensure-spark-pool|ivy-ready|spark-ready|kafka-ready)$$'
+	@$(MAKE) --no-print-directory help-section SECTION="Pipelines Spark" FILTER='^(run-xls-to-bronze|run-bronze-to-silver|run-silver-to-gold|run-gold-to-model|run-etl|run-ml|validate-xls-sources|run-quality-checks|check-ml-readiness|record-pipeline-run)$$'
+	@$(MAKE) --no-print-directory help-section SECTION="Airflow" FILTER='^(trigger-dag|trigger-pipeline|trigger-pipeline-wait)$$'
+	@$(MAKE) --no-print-directory help-section SECTION="Rapports & résultats" FILTER='^(report-eda|report-eda-data|report-eda-ml|sync-report-eda-minio|sync-models-local|ml-metrics|init-ml-schema|logs)$$'
+	@$(MAKE) --no-print-directory help-section SECTION="Développement & maintenance" FILTER='^(test|dev-venv|purge-local|shell-airflow|shell-spark|shell-postgres)$$'
+
+.PHONY: help-section
+help-section:
+	@printf "\n$(BLUE)$(SECTION)$(NC)\n"
+	@grep -hE '^[a-zA-Z0-9_-]+.*:.*## ' $(CURDIR)/Makefile \
+		| sed -E 's/:.*## /|/' \
+		| grep -E '^($(FILTER))\|' \
+		| sort -t'|' -k1 \
+		| awk -F'|' '{printf "  $(YELLOW)%-24s$(NC) %s\n", $$1, $$2}'
 
 urls: ## Afficher les URLs et identifiants des services
 	@printf "$(BLUE)Interfaces web$(NC)\n"
@@ -464,12 +459,34 @@ trigger-pipeline-wait: ivy-ready spark-ready ## Déclencher edf_pipeline_complet
 report-eda-data: ## Rapport pro : consommation + mensuel + qualité — CLI manuel
 	@printf "$(BLUE)Rapport EDA — données$(NC) → ./data/eda/report/ + MinIO rapport-eda\n"
 	@python3 -c "import pandas, matplotlib, boto3" 2>/dev/null || pip3 install -q pandas matplotlib boto3 psycopg2-binary
-	@EDF_PROJECT_ROOT=$(CURDIR) DATA_DIR=$(CURDIR)/data/raw MODEL_LOCAL_PATH=data/models/rte POSTGRES_CONN=postgresql://$(PG_USER):edf123@localhost:5432/$(PG_DB) PYTHONPATH=. python3 scripts/generate_report_eda.py --data-only
+	@EDF_PROJECT_ROOT=$(CURDIR) DATA_DIR=$(CURDIR)/data/raw MODEL_LOCAL_PATH=data/models/rte \
+		MINIO_ENDPOINT=http://localhost:9000 \
+		POSTGRES_CONN=postgresql://$(PG_USER):edf123@localhost:5432/$(PG_DB) \
+		PYTHONPATH=. python3 scripts/generate_report_eda.py --data-only
 
 report-eda-ml: init-ml-schema ## Rapport pro : tuiles ML dashboard — CLI manuel
 	@printf "$(BLUE)Rapport EDA — ML$(NC) → ./data/eda/report/ + MinIO rapport-eda\n"
 	@python3 -c "import pandas, matplotlib, pyarrow, boto3" 2>/dev/null || pip3 install -q pandas matplotlib pyarrow boto3 psycopg2-binary
-	@EDF_PROJECT_ROOT=$(CURDIR) DATA_DIR=$(CURDIR)/data/raw MODEL_LOCAL_PATH=data/models/rte POSTGRES_CONN=postgresql://$(PG_USER):edf123@localhost:5432/$(PG_DB) PYTHONPATH=. python3 scripts/generate_report_eda.py --ml-only
+	@EDF_PROJECT_ROOT=$(CURDIR) DATA_DIR=$(CURDIR)/data/raw MODEL_LOCAL_PATH=data/models/rte \
+		MINIO_ENDPOINT=http://localhost:9000 \
+		POSTGRES_CONN=postgresql://$(PG_USER):edf123@localhost:5432/$(PG_DB) \
+		PYTHONPATH=. python3 scripts/generate_report_eda.py --ml-only
+
+sync-report-eda-minio: ## Pousser les PNG locaux data/eda/report/ → MinIO rapport-eda
+	@python3 -c "import boto3" 2>/dev/null || pip3 install -q boto3
+	@EDF_PROJECT_ROOT=$(CURDIR) MINIO_ENDPOINT=http://localhost:9000 PYTHONPATH=. python3 -c "\
+from pathlib import Path; \
+from spark.common.config import REPORT_EDA_LOCAL, REPORT_EDA_S3_PREFIX; \
+from spark.common.eda_specs import all_report_filenames; \
+from spark.common.object_storage import sync_report_pngs; \
+root=Path(REPORT_EDA_LOCAL); \
+root=root if root.is_absolute() else Path('$(CURDIR)')/REPORT_EDA_LOCAL; \
+names=all_report_filenames(); \
+local=[n for n in names if (root/n).is_file()]; \
+uris=sync_report_pngs(root, names); \
+prefix=REPORT_EDA_S3_PREFIX.strip('/'); \
+dest=f's3a://rapport-eda/{prefix}/' if prefix else 's3a://rapport-eda/'; \
+print(f'Sync MinIO : {len(uris)}/{len(names)} PNG ({len(local)} local) → {dest}')"
 
 report-eda: report-eda-data report-eda-ml ## Rapport pro complet (ML en attente si non entraîné)
 	@count=$$(find data/eda/report -maxdepth 1 -name '*.png' 2>/dev/null | wc -l | tr -d ' '); \
@@ -532,7 +549,29 @@ dev-venv: ## Crée .venv et installe requirements-test.txt (numpy/pyarrow éping
 	$(PIP) install -r requirements-test.txt
 	@printf "$(GREEN)[OK]$(NC) Environnement prêt. Lancez : $(CYAN)make test$(NC)\n"
 
-clean: ## Arrêter la stack et supprimer les volumes
+purge-local: ## Caches Python, logs Airflow et artefacts EDA/ML locaux (sans volumes Docker)
+	@printf "$(YELLOW)Nettoyage local…$(NC)\n"
+	@find . \( -path './.venv' -o -path './.git' \) -prune -o -type d -name '__pycache__' -print0 2>/dev/null | xargs -0 rm -rf 2>/dev/null || true
+	@find . \( -path './.venv' -o -path './.git' \) -prune -o -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete 2>/dev/null || true
+	@rm -rf .pytest_cache spark/logs
+	@find . -name '.DS_Store' -delete 2>/dev/null || true
+	@mkdir -p airflow/logs
+	@find airflow/logs -mindepth 1 -delete 2>/dev/null || true
+	@mkdir -p data/eda/report data/models data/raw
+	@find data/eda/report -maxdepth 1 -type f \( -name '*.png' -o -name '*.pending' \) -delete 2>/dev/null || true
+	@find data/models -mindepth 1 -delete 2>/dev/null || true
+	@touch data/eda/report/.gitkeep data/models/.gitkeep
+	@printf "$(GREEN)[OK]$(NC) Projet local remis à zéro (données XLS dans data/raw conservées).\n"
+
+reset-zero: ## Remise à zéro complète : purge locale + volumes Docker (relancer make bootstrap)
+	@$(MAKE) purge-local
+	@$(MAKE) clean
+	@printf "$(GREEN)[OK]$(NC) Environnement prêt pour un démarrage from scratch.\n"
+	@printf "  1. $(CYAN)make bootstrap$(NC)\n"
+	@printf "  2. $(CYAN)make health$(NC)\n"
+	@printf "  3. $(CYAN)make pipeline$(NC)  ou  $(CYAN)make pipeline-spark$(NC)\n"
+
+clean: ## Arrêter la stack et supprimer les volumes Docker (MinIO, Postgres, caches Spark)
 	@printf "$(RED)[ATTENTION]$(NC) Suppression des volumes Docker.\n"
 	$(DOCKER_COMPOSE) down -v --remove-orphans
 

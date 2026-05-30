@@ -160,7 +160,7 @@
     },
     {
       "datasource": { "type": "postgres", "uid": "edf-postgres" },
-      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "fieldConfig": { "defaults": { "unit": "none", "noValue": "— (lancer make run-ml)" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 27 },
       "id": 211,
       "options": { "colorMode": "value", "graphMode": "none", "textMode": "value", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^metric$/", "values": false } },
@@ -170,7 +170,7 @@
     },
     {
       "datasource": { "type": "postgres", "uid": "edf-postgres" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "short", "decimals": 1 }, "overrides": [] },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "short", "decimals": 1, "noValue": "—" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 27 },
       "id": 212,
       "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^metric$/", "values": false } },
@@ -276,7 +276,7 @@
         "datasource": { "type": "postgres", "uid": "edf-postgres" },
         "editorMode": "code",
         "format": "time_series",
-        "rawSql": "SELECT trained_at AS time, rmse AS \"RMSE (meilleur modèle/run)\" FROM (SELECT run_id, MIN(rmse) AS rmse, MAX(trained_at) AS trained_at FROM etl.model_metrics GROUP BY run_id) t ORDER BY 1",
+        "rawSql": "SELECT trained_at AT TIME ZONE 'UTC' AS time, rmse AS \"RMSE (meilleur modèle/run)\" FROM (SELECT run_id, MIN(rmse) AS rmse, MAX(trained_at) AS trained_at FROM etl.model_metrics GROUP BY run_id) t WHERE trained_at IS NOT NULL ORDER BY 1",
         "refId": "A"
       }],
       "title": "Évolution RMSE (meilleur modèle par run)",
@@ -310,7 +310,7 @@
   "schemaVersion": 39,
   "tags": ["edf", "analytics", "ml", "rte"],
   "templating": { "list": [] },
-  "time": { "from": "now-24h", "to": "now" },
+  "time": { "from": "now-90d", "to": "now" },
   "timepicker": { "refresh_intervals": ["30s", "1m", "5m", "15m"] },
   "timezone": "browser",
   "title": "EDF Energy Prediction — Analytics & ML",

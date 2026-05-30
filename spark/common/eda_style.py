@@ -29,7 +29,6 @@ COLORS = {
     "muted": "#64748B",
     "grid": "#E2E8F0",
     "missing": "#DC2626",
-    "quality": "#0891B2",
     "white": "#FFFFFF",
 }
 
@@ -227,11 +226,6 @@ def format_mw_axis(ax: plt.Axes, *, unit: str = "MW") -> None:
         ax.set_ylabel(f"Puissance ({unit})")
 
 
-def format_percent_axis(ax: plt.Axes) -> None:
-    """Formats the percent axis."""
-    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _pos: f"{x:.0f} %"))
-
-
 def prepare_time_series(
     df: pd.DataFrame,
     datetime_col: str,
@@ -249,103 +243,6 @@ def prepare_time_series(
     gap = out[datetime_col].diff() > pd.Timedelta(hours=gap_hours)
     out.loc[gap, value_col] = float("nan")
     return out
-
-
-def plot_consumption_series(
-    ax: plt.Axes,
-    ts: pd.DataFrame,
-    datetime_col: str,
-    value_col: str,
-    *,
-    title: str | None = None,
-    subtitle: str | None = None,
-    ma_days: int = 7,
-    raw_alpha: float = 0.2,
-) -> None:
-    """Série horaire + moyenne mobile."""
-    _style_ax_dashboard(ax, grid_axis="both")
-    if ts.empty:
-        ax.text(0.5, 0.5, "Données indisponibles", ha="center", va="center", transform=ax.transAxes)
-        return
-
-    dt = ts[datetime_col]
-    values = ts[value_col]
-    ax.plot(dt, values, color=COLORS["series_light"], linewidth=0.5, alpha=raw_alpha, label="Mesure horaire")
-
-    if len(ts) >= ma_days * 24:
-        ma = (
-            ts.set_index(datetime_col)[value_col]
-            .rolling(f"{ma_days}D", min_periods=ma_days)
-            .mean()
-        )
-        ax.plot(
-            ma.index,
-            ma.values,
-            color=COLORS["primary"],
-            linewidth=2.2,
-            label=f"Moyenne mobile {ma_days} j",
-        )
-
-    ax.set_xlim(dt.min(), dt.max())
-    if title:
-        ax.set_title(title, pad=14 if subtitle else 8, fontweight="bold", loc="left")
-    if subtitle:
-        ax.text(0.0, 1.02, subtitle, transform=ax.transAxes, ha="left", va="bottom", fontsize=9, color=DASHBOARD["subtitle"])
-    ax.set_xlabel("Période")
-    format_mw_axis(ax)
-    ax.legend(loc="upper right", frameon=True, facecolor="white", edgecolor=DASHBOARD["panel_border"])
-
-
-def plot_missing_bars(
-    ax: plt.Axes,
-    missing_pct: pd.Series,
-    *,
-    title: str,
-    top_n: int = 12,
-) -> None:
-    """Barres horizontales — taux de valeurs manquantes."""
-    _style_ax_dashboard(ax, grid_axis="x")
-    series = missing_pct[missing_pct > 0].sort_values(ascending=True).tail(top_n)
-    if series.empty:
-        ax.text(0.5, 0.5, "Aucune valeur manquante significative", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title(title, loc="left", fontweight="bold")
-        return
-
-    labels = [human_label(str(k)) for k in series.index]
-    bars = ax.barh(labels, series.values, color=COLORS["missing"], height=0.62, alpha=0.88)
-    ax.set_title(title, loc="left", fontweight="bold")
-    ax.set_xlabel("Part de valeurs manquantes (%)")
-    format_percent_axis(ax)
-    for bar, val in zip(bars, series.values):
-        ax.text(val + 0.25, bar.get_y() + bar.get_height() / 2, f"{val:.1f} %", va="center", fontsize=8, color=COLORS["neutral"])
-
-
-def plot_quality_distribution(ax: plt.Axes, scores: pd.Series, *, title: str) -> None:
-    """Distribution du score qualité."""
-    _style_ax_dashboard(ax)
-    clean = scores.dropna()
-    if clean.empty:
-        ax.text(0.5, 0.5, "Score qualité indisponible", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title(title, loc="left", fontweight="bold")
-        return
-
-    rounded = clean.round(3)
-    counts = rounded.value_counts().sort_index()
-    labels = [f"{v:.3f}".replace(".", ",") for v in counts.index]
-    bars = ax.bar(labels, counts.values, color=COLORS["quality"], width=0.6, alpha=0.9, edgecolor="white", linewidth=0.8)
-    ax.set_title(title, loc="left", fontweight="bold")
-    ax.set_xlabel("Score de qualité (0–1)")
-    ax.set_ylabel("Nombre d'enregistrements")
-    for bar, val in zip(bars, counts.values):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height(),
-            f"{val:,}".replace(",", " "),
-            ha="center",
-            va="bottom",
-            fontsize=8,
-            color=COLORS["neutral"],
-        )
 
 
 def save_report_figure(fig: plt.Figure, path: str, *, dpi: int = REPORT_DPI) -> str:
@@ -1337,3 +1234,789 @@ def build_ml_synthesis_figure(
     footnote = synthesis_footnote(metrics, best_model=best_model)
     plot_metrics_detail_table(ax, metrics, footnote=footnote)
     return fig, (ax,)
+
+
+# --- Graphiques EDA données (rapport professionnel) ---------------------------------
+
+# Bornes alignées sur spark/transform/silver.py (clean)
+SILVER_CONSO_MIN_MW = 10_000.0
+SILVER_CONSO_MAX_MW = 120_000.0
+
+# Différenciation visuelle — bonnes pratiques EDA (brut vs traité)
+DATA_LAYER = {
+    "raw": "#94A3B8",
+    "raw_label": "Données brutes (source XLS)",
+    "silver": "#0B3D91",
+    "silver_label": "Données nettoyées (Silver ETL)",
+}
+
+CORRECTION_COLORS = {
+    "unchanged": "#059669",
+    "minor": "#2563EB",
+    "major": "#EA580C",
+    "removed": "#DC2626",
+}
+
+CORRECTION_LABELS = {
+    "unchanged": "Inchangé",
+    "minor": "Correction mineure (imputation)",
+    "major": "Correction majeure",
+    "removed": "Anomalie supprimée",
+}
+
+
+def _is_consumption_outlier(values: pd.Series) -> pd.Series:
+    cons = pd.to_numeric(values, errors="coerce")
+    return cons.isna() | (cons < 0) | (cons < SILVER_CONSO_MIN_MW) | (cons > SILVER_CONSO_MAX_MW)
+
+
+def _dedupe_raw(raw_df: pd.DataFrame) -> pd.DataFrame:
+    work = raw_df.copy()
+    work["datetime"] = _normalize_eda_datetime(work["datetime"])
+    return work.sort_values("datetime").drop_duplicates("datetime", keep="last")
+
+
+def _normalize_eda_datetime(series: pd.Series) -> pd.Series:
+    """UTC + arrondi 30 min pour aligner XLS et PostgreSQL Silver."""
+    dt = pd.to_datetime(series, errors="coerce", utc=True)
+    return dt.dt.floor("30min")
+
+
+def _build_point_comparison(raw_df: pd.DataFrame, silver_df: pd.DataFrame) -> pd.DataFrame:
+    raw = _dedupe_raw(raw_df)
+    silver = silver_df.copy()
+    silver["datetime"] = _normalize_eda_datetime(silver["datetime"])
+    if "is_interpolated" not in silver.columns:
+        silver["is_interpolated"] = False
+    merged = raw[["datetime", "consumption_mw"]].merge(
+        silver[["datetime", "consumption_mw", "is_interpolated"]],
+        on="datetime",
+        how="outer",
+        suffixes=("_raw", "_silver"),
+    ).sort_values("datetime")
+
+    raw_v = pd.to_numeric(merged["consumption_mw_raw"], errors="coerce")
+    silver_v = pd.to_numeric(merged["consumption_mw_silver"], errors="coerce")
+    interp = merged["is_interpolated"].fillna(False).astype(bool)
+    raw_out = _is_consumption_outlier(raw_v)
+    silver_out = _is_consumption_outlier(silver_v)
+    rel = (raw_v - silver_v).abs() / raw_v.abs().clip(lower=1.0)
+
+    correction = pd.Series("unchanged", index=merged.index, dtype="object")
+    correction.loc[raw_v.notna() & silver_v.isna()] = "removed"
+    correction.loc[raw_v.isna() & silver_v.notna()] = "minor"
+    both = raw_v.notna() & silver_v.notna()
+    removed = both & raw_out & ~silver_out
+    major = both & ~removed & (rel > 0.05)
+    minor = both & ~removed & ~major & (interp | raw_out | (rel > 0.01))
+    correction.loc[removed] = "removed"
+    correction.loc[major] = "major"
+    correction.loc[minor] = "minor"
+    merged["correction"] = correction
+    return merged
+
+
+def _comparison_summary(merged: pd.DataFrame, raw_df: pd.DataFrame) -> dict[str, Any]:
+    n_raw = len(raw_df)
+    n_dedup = len(_dedupe_raw(raw_df))
+    n_silver = int(merged["consumption_mw_silver"].notna().sum())
+    modified = merged[merged["correction"] != "unchanged"]
+    interp = int((merged["correction"] == "minor").sum())
+    removed = int((merged["correction"] == "removed").sum())
+    return {
+        "n_raw": n_raw,
+        "n_dedup": n_dedup,
+        "n_silver": n_silver,
+        "n_modified": len(modified),
+        "pct_modified": 100.0 * len(modified) / max(len(merged), 1),
+        "pct_imputed": 100.0 * interp / max(n_silver, 1),
+        "n_removed": removed,
+        "duplicates": n_raw - n_dedup,
+    }
+
+
+def _anomaly_heatmap_matrix(
+    df: pd.DataFrame,
+    numeric_cols: list[str],
+    top_n: int = 6,
+) -> tuple[np.ndarray, list[str], list[str]]:
+    work = df.copy()
+    work["datetime"] = pd.to_datetime(work["datetime"], errors="coerce", utc=True)
+    work = work.dropna(subset=["datetime"])
+    if work.empty:
+        return np.empty((0, 0)), [], []
+    work["month"] = work["datetime"].dt.tz_convert(None).dt.to_period("M").astype(str)
+    rates = {}
+    for c in numeric_cols:
+        if c not in work.columns:
+            continue
+        cons = pd.to_numeric(work.get("consumption_mw"), errors="coerce") if c == "consumption_mw" else None
+        if c == "consumption_mw":
+            flag = work[c].isna() | _is_consumption_outlier(work[c])
+        else:
+            flag = work[c].isna()
+        rates[c] = flag.groupby(work["month"]).mean().to_dict()
+    cols = sorted(
+        [c for c in numeric_cols if c in rates],
+        key=lambda c: np.mean(list(rates[c].values())) if rates[c] else 0,
+        reverse=True,
+    )[:top_n]
+    if not cols:
+        return np.empty((0, 0)), [], []
+    months = sorted({m for c in cols for m in rates[c]})
+    matrix = np.array([[rates[c].get(m, 0.0) * 100.0 for m in months] for c in cols])
+    return matrix, [human_label(c) for c in cols], [m[2:7] if len(m) >= 7 else m for m in months]
+
+
+def _consumption_stats(cons: pd.Series) -> dict[str, float]:
+    clean = pd.to_numeric(cons, errors="coerce").dropna()
+    if clean.empty:
+        return {"mean": np.nan, "std": np.nan, "min": np.nan, "max": np.nan, "outliers": 0}
+    outlier = _is_consumption_outlier(clean).sum()
+    return {
+        "mean": float(clean.mean()),
+        "std": float(clean.std(ddof=0)),
+        "min": float(clean.min()),
+        "max": float(clean.max()),
+        "outliers": int(outlier),
+    }
+
+
+def _subsample_series(ts: pd.DataFrame, datetime_col: str, max_points: int = 8_000) -> pd.DataFrame:
+    if len(ts) <= max_points:
+        return ts
+    step = max(len(ts) // max_points, 1)
+    return ts.iloc[::step].copy()
+
+
+def _rolling_mean_dataframe(
+    ts: pd.DataFrame,
+    datetime_col: str,
+    value_col: str,
+    *,
+    window: str = "7D",
+    min_periods: int = 72,
+) -> pd.DataFrame:
+    """Moyenne mobile pour lisser la comparaison brute vs Silver."""
+    if ts.empty or len(ts) < min_periods:
+        return pd.DataFrame(columns=[datetime_col, value_col])
+    work = ts[[datetime_col, value_col]].copy().sort_values(datetime_col)
+    ma = (
+        work.set_index(datetime_col)[value_col]
+        .rolling(window, min_periods=min_periods)
+        .mean()
+        .dropna()
+    )
+    return ma.reset_index()
+
+
+def _shade_interp_blocks(ax: plt.Axes, merged: pd.DataFrame, *, alpha: float = 0.06) -> None:
+    """Zones d'imputation Silver (is_interpolated), pas les trous bruts non appariés."""
+    if "is_interpolated" not in merged.columns:
+        return
+    mask = merged["is_interpolated"].fillna(False).astype(bool)
+    if not mask.any():
+        return
+    block_id = (mask != mask.shift()).cumsum()
+    for bid in block_id[mask].unique():
+        block = merged.loc[block_id == bid]
+        if block.empty:
+            continue
+        ax.axvspan(
+            block["datetime"].iloc[0],
+            block["datetime"].iloc[-1],
+            color=COLORS["missing"],
+            alpha=alpha,
+            zorder=1,
+        )
+
+
+def _daily_correction_stack(merged: pd.DataFrame) -> pd.DataFrame:
+    """Nombre de points corrigés par jour et par type (pour barres empilées)."""
+    work = merged.copy()
+    work["date"] = work["datetime"].dt.floor("D")
+    counts = (
+        work.groupby(["date", "correction"], observed=True)
+        .size()
+        .unstack(fill_value=0)
+    )
+    for col in ("minor", "major", "removed"):
+        if col not in counts.columns:
+            counts[col] = 0
+    return counts[["minor", "major", "removed"]].sort_index()
+
+
+def plot_consumption_national_panels(
+    ax_top: plt.Axes,
+    ax_bottom: plt.Axes,
+    ts_raw: pd.DataFrame,
+    datetime_col: str,
+    value_col: str,
+    ts_silver: pd.DataFrame | None = None,
+) -> str:
+    """Série nationale — brute vs Silver superposées + écarts colorés par type de correction."""
+    _style_ax_dashboard(ax_top, grid_axis="both")
+    _style_ax_dashboard(ax_bottom, grid_axis="both")
+    if ts_raw.empty:
+        msg = "Données brutes indisponibles"
+        ax_top.text(0.5, 0.5, msg, ha="center", va="center", transform=ax_top.transAxes)
+        ax_bottom.set_visible(False)
+        return msg
+
+    plot_ts = _subsample_series(ts_raw, datetime_col)
+    dt = plot_ts[datetime_col]
+    t_min, t_max = dt.min(), dt.max()
+    values = plot_ts[value_col].to_numpy(dtype=float)
+    y_lo = float(np.nanmin(values))
+    y_hi = float(np.nanmax(values))
+    _shade_weekends_and_holidays(ax_top, t_min, t_max, y_lo=y_lo, y_hi=y_hi)
+
+    note_parts: list[str] = []
+    if ts_silver is not None and not ts_silver.empty:
+        raw_ma = _rolling_mean_dataframe(ts_raw, datetime_col, value_col)
+        silver_ma = _rolling_mean_dataframe(ts_silver, datetime_col, value_col)
+
+        if not raw_ma.empty:
+            ax_top.plot(
+                raw_ma[datetime_col],
+                raw_ma[value_col],
+                color=DATA_LAYER["raw"],
+                linewidth=2.4,
+                alpha=0.95,
+                linestyle=(0, (6, 3)),
+                label=f"{DATA_LAYER['raw_label']} (MM 7 j)",
+                zorder=3,
+            )
+        if not silver_ma.empty:
+            ax_top.plot(
+                silver_ma[datetime_col],
+                silver_ma[value_col],
+                color=DATA_LAYER["silver"],
+                linewidth=2.8,
+                alpha=1.0,
+                linestyle="-",
+                label=f"{DATA_LAYER['silver_label']} (MM 7 j)",
+                zorder=4,
+            )
+
+        ax_top.plot(
+            dt,
+            values,
+            color=DATA_LAYER["raw"],
+            linewidth=0.45,
+            alpha=0.18,
+            linestyle="--",
+            label="Mesures horaires brutes",
+            zorder=2,
+        )
+
+        merged = _build_point_comparison(ts_raw, ts_silver)
+        summary = _comparison_summary(merged, ts_raw)
+        _shade_interp_blocks(ax_top, merged)
+
+        outlier_mask = _is_consumption_outlier(plot_ts[value_col])
+        if outlier_mask.any():
+            ax_top.scatter(
+                plot_ts.loc[outlier_mask, datetime_col],
+                plot_ts.loc[outlier_mask, value_col],
+                marker="x",
+                s=22,
+                color=COLORS["missing"],
+                alpha=0.75,
+                linewidths=1.0,
+                label="Outliers bruts",
+                zorder=6,
+            )
+
+        daily_stack = _daily_correction_stack(merged)
+        if len(daily_stack) > 400:
+            daily_stack = daily_stack.iloc[:: max(len(daily_stack) // 400, 1)]
+
+        bottom = np.zeros(len(daily_stack))
+        x_days = daily_stack.index
+        for corr_type in ("minor", "major", "removed"):
+            heights = daily_stack[corr_type].to_numpy(dtype=float)
+            ax_bottom.bar(
+                x_days,
+                heights,
+                bottom=bottom,
+                width=1.2,
+                color=CORRECTION_COLORS[corr_type],
+                alpha=0.88,
+                edgecolor="none",
+                label=CORRECTION_LABELS[corr_type],
+            )
+            bottom = bottom + heights
+
+        ax_bottom.set_ylabel("Points corrigés / jour")
+        ax_bottom.set_title(
+            "Corrections appliquées (volume journalier par type)",
+            loc="left",
+            fontsize=11,
+            fontweight="600",
+            pad=8,
+        )
+        ax_bottom.legend(loc="upper right", fontsize=7, ncol=3, frameon=True)
+
+        pct_out = 100.0 * summary["n_removed"] / max(summary["n_dedup"], 1)
+        note_parts.append(
+            f"{summary['n_modified']:,} points modifiés ({summary['pct_modified']:.1f} %) · "
+            f"{summary['pct_imputed']:.1f} % imputés · {pct_out:.1f} % anomalies supprimées".replace(",", " ")
+        )
+        ax_top.set_title(
+            f"Impact du nettoyage — consommation nationale ({pct_out:.1f} % de points aberrants corrigés)",
+            loc="left",
+            fontsize=11,
+            fontweight="600",
+            pad=8,
+        )
+    else:
+        ax_top.plot(
+            dt,
+            values,
+            color=DATA_LAYER["raw"],
+            linewidth=1.2,
+            alpha=0.85,
+            linestyle="--",
+            label=DATA_LAYER["raw_label"],
+            zorder=2,
+        )
+        outlier_mask = _is_consumption_outlier(plot_ts[value_col])
+        if outlier_mask.any():
+            ax_top.scatter(
+                plot_ts.loc[outlier_mask, datetime_col],
+                plot_ts.loc[outlier_mask, value_col],
+                marker="x",
+                s=18,
+                color=COLORS["missing"],
+                alpha=0.65,
+                linewidths=0.8,
+                label="Outliers bruts",
+                zorder=5,
+            )
+        ax_top.set_title(
+            "Consommation horaire — source brute (Silver indisponible)",
+            loc="left",
+            fontsize=11,
+            fontweight="600",
+            pad=8,
+        )
+        note_parts.append("Lancer make run-etl pour comparer avec la couche Silver")
+        ax_bottom.text(
+            0.5,
+            0.5,
+            "Couche Silver indisponible\n(comparaison avant/après)",
+            ha="center",
+            va="center",
+            transform=ax_bottom.transAxes,
+            fontsize=10,
+            color=COLORS["muted"],
+        )
+
+    ax_top.set_xlim(t_min, t_max)
+    ax_top.set_ylabel("Puissance (MW)")
+    format_mw_axis(ax_top)
+    ax_top.legend(loc="upper left", frameon=True, facecolor="white", edgecolor=DASHBOARD["panel_border"], fontsize=8)
+    ax_top.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax_bottom.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    return " · ".join(p for p in note_parts if p)
+
+
+def build_consumption_national_figure(
+    ts_raw: pd.DataFrame,
+    datetime_col: str = "datetime",
+    value_col: str = "consumption_mw",
+    ts_silver: pd.DataFrame | None = None,
+) -> tuple[plt.Figure, str]:
+    fig, (ax_top, ax_bottom) = plt.subplots(2, 1, figsize=(14, 8.8), sharex=False)
+    note = plot_consumption_national_panels(ax_top, ax_bottom, ts_raw, datetime_col, value_col, ts_silver)
+    fig.subplots_adjust(hspace=0.34, top=0.82, bottom=0.08, left=0.07, right=0.98)
+    return fig, note
+
+
+def _monthly_twh_chronology(df: pd.DataFrame) -> pd.DataFrame:
+    work = df[["datetime", "consumption_mw"]].copy()
+    work["datetime"] = pd.to_datetime(work["datetime"], errors="coerce", utc=True)
+    work["consumption_mw"] = pd.to_numeric(work["consumption_mw"], errors="coerce")
+    work = work.dropna()
+    if work.empty:
+        return pd.DataFrame(columns=["period", "label", "consumption_total_twh"])
+    monthly = (
+        work.set_index("datetime")
+        .resample("MS")["consumption_mw"]
+        .mean()
+        .dropna()
+        .reset_index()
+    )
+    hours = monthly["datetime"].dt.days_in_month * 24
+    monthly["consumption_total_twh"] = monthly["consumption_mw"] * hours / 1_000_000
+    monthly["period"] = monthly["datetime"]
+    monthly["label"] = monthly["datetime"].dt.strftime("%Y-%m")
+    return monthly[["period", "label", "consumption_total_twh"]]
+
+
+def plot_monthly_comparison(
+    ax_bars: plt.Axes,
+    ax_table: plt.Axes,
+    monthly_raw: pd.DataFrame,
+    monthly_silver: pd.DataFrame | None = None,
+) -> str:
+    """Barres groupées avant/après par mois + tendance Silver + tableau récap."""
+    _style_ax_dashboard(ax_bars, grid_axis="y")
+    ax_table.axis("off")
+
+    if monthly_raw.empty:
+        msg = "Données mensuelles indisponibles"
+        ax_bars.text(0.5, 0.5, msg, ha="center", va="center", transform=ax_bars.transAxes)
+        return msg
+
+    chron_raw = monthly_raw.sort_values("period").reset_index(drop=True)
+    n = len(chron_raw)
+    x = np.arange(n)
+    width = 0.36
+
+    ax_bars.bar(
+        x - width / 2,
+        chron_raw["consumption_total_twh"],
+        width=width,
+        color=DATA_LAYER["raw"],
+        alpha=0.55,
+        label=DATA_LAYER["raw_label"],
+        edgecolor="white",
+        linewidth=0.4,
+    )
+
+    note_parts: list[str] = []
+    max_gap_row: dict[str, Any] | None = None
+    max_gap_pct = 0.0
+
+    if monthly_silver is not None and not monthly_silver.empty:
+        chron_silver = monthly_silver.sort_values("period").reset_index(drop=True)
+        merged = chron_raw.merge(chron_silver, on="label", suffixes=("_raw", "_silver"), how="inner")
+        silver_aligned = merged["consumption_total_twh_silver"].to_numpy(dtype=float)
+        raw_aligned = merged["consumption_total_twh_raw"].to_numpy(dtype=float)
+        x_merged = np.arange(len(merged))
+
+        ax_bars.bar(
+            x_merged + width / 2,
+            silver_aligned,
+            width=width,
+            color=DATA_LAYER["silver"],
+            alpha=0.92,
+            label=DATA_LAYER["silver_label"],
+            edgecolor="white",
+            linewidth=0.4,
+        )
+
+        if len(silver_aligned) >= 3:
+            z = np.polyfit(x_merged, silver_aligned, 1)
+            trend = np.poly1d(z)
+            ax_bars.plot(
+                x_merged,
+                trend(x_merged),
+                color=COLORS["accent"],
+                linewidth=2.0,
+                linestyle="-",
+                label="Tendance (Silver)",
+                zorder=5,
+            )
+
+        for i, row in merged.iterrows():
+            raw_v = float(row["consumption_total_twh_raw"])
+            sil_v = float(row["consumption_total_twh_silver"])
+            if raw_v <= 0:
+                continue
+            pct = (sil_v - raw_v) / raw_v * 100.0
+            if abs(pct) >= 1.0:
+                ax_bars.annotate(
+                    f"{pct:+.1f} %",
+                    xy=(x_merged[i], max(raw_v, sil_v)),
+                    xytext=(0, 4),
+                    textcoords="offset points",
+                    ha="center",
+                    fontsize=6,
+                    color=COLORS["muted"],
+                )
+            if abs(pct) > abs(max_gap_pct):
+                max_gap_pct = pct
+                max_gap_row = {"label": row["label"], "pct": pct, "raw": raw_v, "silver": sil_v}
+
+        mean_pct = float(
+            (
+                (merged["consumption_total_twh_silver"] - merged["consumption_total_twh_raw"]).abs()
+                / merged["consumption_total_twh_raw"].replace(0, np.nan)
+                * 100.0
+            ).mean()
+        )
+        note_parts.append(f"Écart mensuel moyen brute/Silver : {mean_pct:.2f} % TWh")
+        ax_bars.set_title(
+            "Volume mensuel — barres groupées brute vs nettoyée",
+            loc="left",
+            fontsize=11,
+            fontweight="600",
+            pad=8,
+        )
+    else:
+        ax_bars.set_title("Volume mensuel — source brute (Silver indisponible)", loc="left", fontsize=11, fontweight="600", pad=8)
+        note_parts.append("Lancer make run-etl pour la comparaison nettoyée")
+
+    tick_step = max(n // 18, 1)
+    ax_bars.set_xticks(x[::tick_step])
+    ax_bars.set_xticklabels(chron_raw["label"].iloc[::tick_step], rotation=45, ha="right", fontsize=7)
+    ax_bars.set_ylabel("Énergie (TWh)")
+    ax_bars.legend(loc="upper left", fontsize=8, frameon=True)
+
+    if max_gap_row is not None:
+        cause = (
+            f"Imputation / filtrage ETL ({abs(max_gap_row['pct']):.1f} % d'écart TWh)"
+            if abs(max_gap_row["pct"]) >= 3
+            else "Variations normales de qualité source"
+        )
+        table_data = [
+            ["Mois écart max.", max_gap_row["label"]],
+            ["Écart brute → Silver", f"{max_gap_row['pct']:+.1f} %"],
+            ["TWh brute / Silver", f"{max_gap_row['raw']:.2f} / {max_gap_row['silver']:.2f}"],
+            ["Cause probable", cause],
+        ]
+        tbl = ax_table.table(
+            cellText=table_data,
+            colLabels=["Indicateur", "Valeur"],
+            loc="center",
+            cellLoc="left",
+            colWidths=[0.38, 0.62],
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(8)
+        tbl.scale(1.0, 1.35)
+        for (r, c), cell in tbl.get_celld().items():
+            if r == 0:
+                cell.set_facecolor(DASHBOARD["panel"])
+                cell.set_text_props(fontweight="600")
+            else:
+                cell.set_facecolor("white")
+
+    return " · ".join(note_parts)
+
+
+def build_monthly_comparison_figure(
+    df_raw: pd.DataFrame,
+    df_silver: pd.DataFrame | None = None,
+) -> tuple[plt.Figure, str]:
+    monthly_raw = _monthly_twh_chronology(df_raw)
+    monthly_silver = _monthly_twh_chronology(df_silver) if df_silver is not None and not df_silver.empty else None
+    fig = plt.figure(figsize=(14, 9.0))
+    gs = fig.add_gridspec(2, 1, height_ratios=[4.2, 1.0], hspace=0.28)
+    ax_bars = fig.add_subplot(gs[0])
+    ax_table = fig.add_subplot(gs[1])
+    note = plot_monthly_comparison(ax_bars, ax_table, monthly_raw, monthly_silver)
+    fig.subplots_adjust(top=0.82, bottom=0.10, left=0.07, right=0.98)
+    return fig, note
+
+
+def _quality_category_counts(
+    df: pd.DataFrame,
+    numeric_cols: list[str],
+    *,
+    use_silver_bounds: bool = False,
+) -> dict[str, float]:
+    if df.empty or not numeric_cols:
+        return {"valid": 0.0, "missing": 0.0, "outlier": 0.0, "partial": 0.0}
+    present = df[numeric_cols]
+    score = present.notna().sum(axis=1) / len(numeric_cols)
+    cons = pd.to_numeric(df.get("consumption_mw"), errors="coerce")
+    missing = present.isna().any(axis=1) | cons.isna()
+    if use_silver_bounds:
+        outlier = (~missing) & (
+            (cons < SILVER_CONSO_MIN_MW) | (cons > SILVER_CONSO_MAX_MW)
+        )
+    else:
+        outlier = (~missing) & (
+            (cons < 0) | (cons > SILVER_CONSO_MAX_MW)
+        )
+    partial = (~missing) & (~outlier) & (score < 1.0)
+    valid = (~missing) & (~outlier) & (score >= 1.0)
+    n = len(df)
+    return {
+        "valid": 100.0 * valid.sum() / n,
+        "missing": 100.0 * missing.sum() / n,
+        "outlier": 100.0 * outlier.sum() / n,
+        "partial": 100.0 * partial.sum() / n,
+    }
+
+
+def _quality_volume_summary(raw_df: pd.DataFrame, silver_df: pd.DataFrame | None) -> dict[str, int]:
+    n_raw = len(raw_df)
+    if silver_df is None or silver_df.empty:
+        return {"raw": n_raw, "silver": 0, "duplicates": 0, "removed": 0}
+    dt = pd.to_datetime(raw_df["datetime"], errors="coerce", utc=True)
+    n_dup = int(dt.duplicated().sum())
+    n_silver = len(silver_df)
+    return {
+        "raw": n_raw,
+        "silver": n_silver,
+        "duplicates": n_dup,
+        "removed": max(n_raw - n_dup - n_silver, 0),
+    }
+
+
+def plot_quality_raw_vs_silver_panels(
+    axes: np.ndarray,
+    raw_df: pd.DataFrame,
+    silver_df: pd.DataFrame | None,
+    numeric_cols: list[str],
+) -> str:
+    """Dashboard qualité 4 quadrants — avant/après nettoyage."""
+    ax_complete, ax_heat, ax_dist, ax_stats = axes.flat
+    for ax in (ax_complete, ax_heat, ax_dist):
+        _style_ax_dashboard(ax, grid_axis="y")
+    ax_stats.axis("off")
+
+    if raw_df.empty or not numeric_cols:
+        for ax in axes.flat:
+            ax.text(0.5, 0.5, "Données indisponibles", ha="center", va="center", transform=ax.transAxes)
+        return ""
+
+    raw_counts = _quality_category_counts(raw_df, numeric_cols, use_silver_bounds=False)
+    categories = ["Valides", "Manquantes", "Aberrantes", "Incomplètes"]
+    keys = ["valid", "missing", "outlier", "partial"]
+    y_pos = np.arange(len(categories))
+    width = 0.34
+    raw_vals = [raw_counts[k] for k in keys]
+    ax_complete.barh(y_pos + width / 2, raw_vals, height=width, color=DATA_LAYER["raw"], label="Avant (brut)", alpha=0.85)
+    if silver_df is not None and not silver_df.empty:
+        silver_counts = _quality_category_counts(silver_df, numeric_cols, use_silver_bounds=True)
+        silver_vals = [silver_counts[k] for k in keys]
+        ax_complete.barh(y_pos - width / 2, silver_vals, height=width, color=DATA_LAYER["silver"], label="Après (Silver)", alpha=0.92)
+        interp_pct = 100.0 * silver_df["is_interpolated"].fillna(False).astype(bool).mean() if "is_interpolated" in silver_df.columns else 0.0
+    else:
+        silver_vals = []
+        interp_pct = 0.0
+        ax_complete.text(0.98, 0.04, "Silver indisponible", transform=ax_complete.transAxes, ha="right", fontsize=8, color=COLORS["missing"])
+    ax_complete.set_yticks(y_pos)
+    ax_complete.set_yticklabels(categories)
+    ax_complete.set_xlim(0, 100)
+    ax_complete.set_xlabel("Part des enregistrements (%)")
+    ax_complete.set_title("Q1 — Complétude avant / après", loc="left", fontweight="600", fontsize=10)
+    ax_complete.legend(loc="lower right", fontsize=7.5)
+
+    matrix_before, row_labels, col_labels = _anomaly_heatmap_matrix(raw_df, numeric_cols)
+    ax_before = ax_heat.inset_axes([0.0, 0.0, 0.48, 1.0])
+    ax_after = ax_heat.inset_axes([0.52, 0.0, 0.48, 1.0])
+    ax_heat.set_axis_off()
+    vmax = max(float(matrix_before.max()) if matrix_before.size else 1.0, 1.0)
+    if matrix_before.size:
+        im0 = ax_before.imshow(matrix_before, aspect="auto", cmap="Reds", vmin=0, vmax=vmax)
+        ax_before.set_yticks(range(len(row_labels)))
+        ax_before.set_yticklabels(row_labels, fontsize=7)
+        ax_before.set_xticks(range(0, len(col_labels), max(len(col_labels) // 8, 1)))
+        ax_before.set_xticklabels(
+            [col_labels[i] for i in range(0, len(col_labels), max(len(col_labels) // 8, 1))],
+            rotation=45,
+            ha="right",
+            fontsize=6,
+        )
+        ax_before.set_title("Avant", fontsize=8, fontweight="600")
+    else:
+        ax_before.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax_before.transAxes)
+
+    if silver_df is not None and not silver_df.empty:
+        matrix_after, _, _ = _anomaly_heatmap_matrix(silver_df, numeric_cols)
+        if matrix_after.size:
+            ax_after.imshow(matrix_after, aspect="auto", cmap="Reds", vmin=0, vmax=vmax)
+            ax_after.set_yticks(range(len(row_labels)))
+            ax_after.set_yticklabels(row_labels, fontsize=7)
+            ax_after.set_xticks(range(0, len(col_labels), max(len(col_labels) // 8, 1)))
+            ax_after.set_xticklabels(
+                [col_labels[i] for i in range(0, len(col_labels), max(len(col_labels) // 8, 1))],
+                rotation=45,
+                ha="right",
+                fontsize=6,
+            )
+        ax_after.set_title("Après", fontsize=8, fontweight="600")
+    else:
+        ax_after.text(0.5, 0.5, "Silver\nindisponible", ha="center", va="center", transform=ax_after.transAxes, fontsize=8)
+    ax_heat.set_title("Q2 — Anomalies par mois et variable (%)", loc="left", fontweight="600", fontsize=10, y=1.02)
+
+    cons_raw = pd.to_numeric(raw_df.get("consumption_mw"), errors="coerce").dropna()
+    if len(cons_raw) > 20:
+        ax_dist.hist(
+            cons_raw,
+            bins=45,
+            density=True,
+            alpha=0.45,
+            color=COLORS["missing"],
+            label="Avant (brut)",
+            edgecolor="white",
+            linewidth=0.2,
+        )
+        try:
+            cons_raw.plot.kde(ax=ax_dist, color="#DC2626", linewidth=1.6, label="KDE brut")
+        except Exception:
+            pass
+    if silver_df is not None and not silver_df.empty:
+        cons_silver = pd.to_numeric(silver_df.get("consumption_mw"), errors="coerce").dropna()
+        if len(cons_silver) > 20:
+            ax_dist.hist(
+                cons_silver,
+                bins=45,
+                density=True,
+                alpha=0.40,
+                color=DATA_LAYER["silver"],
+                label="Après (Silver)",
+                edgecolor="white",
+                linewidth=0.2,
+            )
+            try:
+                cons_silver.plot.kde(ax=ax_dist, color=DATA_LAYER["silver"], linewidth=1.8, label="KDE Silver")
+            except Exception:
+                pass
+    ax_dist.set_xlabel("Consommation (MW)")
+    ax_dist.set_ylabel("Densité")
+    ax_dist.set_title("Q3 — Distribution consommation avant / après", loc="left", fontweight="600", fontsize=10)
+    ax_dist.legend(fontsize=7.5)
+
+    stats_before = _consumption_stats(raw_df["consumption_mw"])
+    stats_after = _consumption_stats(silver_df["consumption_mw"]) if silver_df is not None and not silver_df.empty else stats_before
+
+    def _pct_delta(before: float, after: float) -> str:
+        if not np.isfinite(before) or before == 0:
+            return "—"
+        return f"{(after - before) / before * 100.0:+.1f} %"
+
+    table_rows = [
+        ["Moyenne (MW)", f"{stats_before['mean']:,.0f}".replace(",", " "), f"{stats_after['mean']:,.0f}".replace(",", " "), _pct_delta(stats_before["mean"], stats_after["mean"])],
+        ["Écart-type", f"{stats_before['std']:,.0f}".replace(",", " "), f"{stats_after['std']:,.0f}".replace(",", " "), _pct_delta(stats_before["std"], stats_after["std"])],
+        ["Min / Max", f"{stats_before['min']:,.0f} / {stats_before['max']:,.0f}".replace(",", " "), f"{stats_after['min']:,.0f} / {stats_after['max']:,.0f}".replace(",", " "), "cohérent" if stats_after["min"] >= SILVER_CONSO_MIN_MW * 0.5 else "filtré"],
+        ["Nb outliers", f"{stats_before['outliers']:,}".replace(",", " "), f"{stats_after['outliers']:,}".replace(",", " "), "100 % corrigé" if stats_after["outliers"] == 0 and stats_before["outliers"] > 0 else "—"],
+    ]
+    tbl = ax_stats.table(
+        cellText=table_rows,
+        colLabels=["Métrique", "Avant", "Après", "Écart"],
+        loc="center",
+        cellLoc="center",
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8)
+    tbl.scale(1.0, 1.45)
+    ax_stats.set_title("Q4 — Résumé statistique", loc="left", fontweight="600", fontsize=10, pad=12)
+
+    vol = _quality_volume_summary(raw_df, silver_df)
+    note_parts = [
+        f"Rétention Silver : {100.0 * vol['silver'] / max(vol['raw'], 1):.1f} %",
+        f"Doublons bruts : {vol['duplicates']:,}".replace(",", " "),
+    ]
+    if silver_df is not None and not silver_df.empty:
+        note_parts.append(f"Imputation Silver : {interp_pct:.1f} %")
+        note_parts.append(f"Outliers corrigés : {stats_before['outliers'] - stats_after['outliers']:,}".replace(",", " "))
+    return " · ".join(note_parts)
+
+
+def build_quality_diagnostic_figure(
+    raw_df: pd.DataFrame,
+    numeric_cols: list[str],
+    silver_df: pd.DataFrame | None = None,
+) -> tuple[plt.Figure, str]:
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9.2))
+    note = plot_quality_raw_vs_silver_panels(axes, raw_df, silver_df, numeric_cols)
+    fig.subplots_adjust(hspace=0.48, wspace=0.32, top=0.82, bottom=0.07, left=0.10, right=0.97)
+    return fig, note
