@@ -24,6 +24,17 @@ def _pg_conn() -> str:
 
 logger = logging.getLogger("gold_to_model")
 
+
+def _normalize_metrics(metrics: dict[str, Any]) -> dict[str, float]:
+    return {
+        "rmse": round(float(metrics["rmse"]), 1),
+        "mae": round(float(metrics["mae"]), 1),
+        "mape": round(float(metrics["mape"]), 2),
+        "r2": round(float(metrics["r2"]), 4),
+        "train_time_s": round(float(metrics["train_time_s"]), 1),
+    }
+
+
 _MODEL_METRICS_DDL: tuple[str, ...] = (
     "CREATE SCHEMA IF NOT EXISTS etl",
     """
@@ -43,6 +54,44 @@ _MODEL_METRICS_DDL: tuple[str, ...] = (
     "ON etl.model_metrics (trained_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_model_metrics_model "
     "ON etl.model_metrics (model_name)",
+    """
+    CREATE OR REPLACE VIEW etl.v_model_metrics_latest AS
+    WITH latest AS (
+        SELECT run_id
+        FROM etl.model_metrics
+        ORDER BY trained_at DESC NULLS LAST
+        LIMIT 1
+    ),
+    ranked AS (
+        SELECT
+            m.*,
+            ROW_NUMBER() OVER (ORDER BY rmse ASC NULLS LAST) AS rang,
+            MIN(rmse) OVER () AS best_rmse
+        FROM etl.model_metrics m
+        WHERE m.run_id = (SELECT run_id FROM latest)
+    )
+    SELECT
+        rang,
+        CASE model_name
+            WHEN 'LinearRegression' THEN 'Régression linéaire'
+            WHEN 'DecisionTree' THEN 'Arbre de décision'
+            WHEN 'RandomForest' THEN 'Forêt aléatoire'
+            WHEN 'GradientBoosting' THEN 'Gradient Boosting'
+            ELSE model_name
+        END AS algorithme,
+        ROUND(rmse::numeric, 1)::double precision AS rmse_mw,
+        ROUND(mae::numeric, 1)::double precision AS mae_mw,
+        ROUND(mape_pct::numeric, 2)::double precision AS mape_pct,
+        ROUND(r2::numeric, 4)::double precision AS r2,
+        ROUND(train_time_s::numeric, 1)::double precision AS train_time_s,
+        ROUND(
+            (((rmse / NULLIF(best_rmse, 0)) - 1) * 100)::numeric,
+            1
+        )::double precision AS rmse_ecart_pct,
+        (rang = 1) AS est_meilleur
+    FROM ranked
+    ORDER BY rang
+    """,
 )
 
 _INSERT_SQL = """
@@ -78,19 +127,21 @@ def persist_metrics_to_postgres(
     now = datetime.now(timezone.utc)
     rid = run_id or now.strftime("%Y%m%d_%H%M%S")
 
-    batch = [
-        (
-            rid,
-            name,
-            float(m["rmse"]),
-            float(m["mae"]),
-            float(m["mape"]),
-            float(m["r2"]),
-            float(m["train_time_s"]),
-            now,
+    batch = []
+    for name, raw in results.items():
+        m = _normalize_metrics(raw)
+        batch.append(
+            (
+                rid,
+                name,
+                m["rmse"],
+                m["mae"],
+                m["mape"],
+                m["r2"],
+                m["train_time_s"],
+                now,
+            )
         )
-        for name, m in results.items()
-    ]
 
     conn = psycopg2.connect(_pg_conn())
     cur = conn.cursor()

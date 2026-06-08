@@ -91,15 +91,17 @@ SPARK_S3A_CONF    := \
 SPARK_EXECUTOR_MEMORY         ?= 2g
 SPARK_EXECUTOR_MEMORY_OVERHEAD?=768m
 SPARK_DRIVER_MEMORY           ?= 5g
-SPARK_SQL_SHUFFLE_PARTITIONS  ?= 4
+SPARK_SQL_SHUFFLE_PARTITIONS  ?= 16
 SPARK_CORES_MAX               ?= 4
 SPARK_ML_DRIVER_MEMORY         ?= 5g
+SPARK_REST_TIMEOUT_SECONDS     ?= 36000
 SPARK_MEM_CONF := \
 	--conf spark.executor.memory=$(SPARK_EXECUTOR_MEMORY) \
 	--conf spark.executor.memoryOverhead=$(SPARK_EXECUTOR_MEMORY_OVERHEAD) \
 	--conf spark.driver.memory=$(SPARK_DRIVER_MEMORY) \
 	--conf spark.sql.shuffle.partitions=$(SPARK_SQL_SHUFFLE_PARTITIONS) \
-	--conf spark.cores.max=$(SPARK_CORES_MAX)
+	--conf spark.cores.max=$(SPARK_CORES_MAX) \
+	--conf spark.rest.timeout.seconds=$(SPARK_REST_TIMEOUT_SECONDS)
 SPARK_ML_MEM_CONF := \
 	--conf spark.driver.memory=$(SPARK_ML_DRIVER_MEMORY) \
 	--conf spark.executor.memory=$(SPARK_EXECUTOR_MEMORY) \
@@ -514,16 +516,11 @@ n=sync_model_artifacts(); \
 r=sync_ml_report_artifacts(); \
 print(f'Sync OK — {n} modèle(s), {r} artefact(s) rapport → {resolve_model_local_path()}')"
 
-ml-metrics: init-ml-schema ## Afficher les métriques ML (etl.model_metrics)
+ml-metrics: init-ml-schema ## Afficher les métriques ML (dernier run, format normalisé)
 	@docker exec $(CN_POSTGRES) psql -U $(PG_USER) -d $(PG_DB) -c "\
-		SELECT trained_at, model_name, \
-		       ROUND(rmse::numeric,2)  AS rmse, \
-		       ROUND(mae::numeric,2)   AS mae, \
-		       ROUND(r2::numeric,3)    AS r2, \
-		       ROUND(mape_pct::numeric,2) AS mape_pct \
-		FROM etl.model_metrics \
-		ORDER BY trained_at DESC \
-		LIMIT 20;" \
+		SELECT rang, algorithme, rmse_mw, mae_mw, mape_pct, r2, train_time_s, rmse_ecart_pct \
+		FROM etl.v_model_metrics_latest \
+		ORDER BY rang;" \
 		2>/dev/null \
 		|| printf "$(YELLOW)[INFO]$(NC) Table etl.model_metrics absente — exécutez : make run-ml\n"
 

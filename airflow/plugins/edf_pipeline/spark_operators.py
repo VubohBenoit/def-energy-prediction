@@ -423,13 +423,11 @@ def _minimum_execution_timeout(poll_timeout: int) -> timedelta:
 def _resolve_execution_timeout(
     poll_timeout: int,
     execution_timeout: timedelta | None,
-    *,
-    ml: bool,
 ) -> timedelta | None:
     """Align Airflow ``execution_timeout`` with ``poll_timeout`` to avoid race kills."""
     minimum = _minimum_execution_timeout(poll_timeout)
     if execution_timeout is None:
-        return minimum if ml else None
+        return minimum
     return max(execution_timeout, minimum)
 
 
@@ -451,9 +449,7 @@ def spark_job(
     effective_poll = (
         poll_timeout if poll_timeout is not None else (POLL_TIMEOUT_ML if ml else POLL_TIMEOUT)
     )
-    resolved_timeout = _resolve_execution_timeout(
-        effective_poll, execution_timeout, ml=ml
-    )
+    resolved_timeout = _resolve_execution_timeout(effective_poll, execution_timeout)
     operator_kwargs: dict[str, Any] = {
         "task_id": task_id,
         "application": f"{JOBS_DIR}/{script}",

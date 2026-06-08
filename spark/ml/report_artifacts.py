@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 REPORT_SUBDIR = "_report"
 
 
+def _filter_feature_complete_rows(df: DataFrame, feature_cols: list[str]) -> DataFrame:
+    """Keep rows usable by VectorAssembler with ``handleInvalid='skip'``."""
+    cond = F.col(LABEL_COL).isNotNull()
+    for col_name in feature_cols:
+        cond = cond & F.col(col_name).isNotNull()
+    return df.filter(cond)
+
+
 def report_artifact_base(model_path: str) -> str:
     return f"{model_path.rstrip('/')}/{REPORT_SUBDIR}"
 
@@ -43,22 +51,29 @@ def compute_rf_learning_curve(
 ) -> DataFrame:
     """Courbe d'apprentissage RF : RMSE (MW) vs taille du jeu d'entraînement."""
     spark = train.sparkSession
-    assembler = build_feature_pipeline(feature_cols)
-    rf = RandomForestRegressor(
-        featuresCol="features",
-        labelCol=LABEL_COL,
-        numTrees=ML_RF_NUM_TREES,
-        maxDepth=ML_RF_MAX_DEPTH,
-        seed=RANDOM_SEED,
-    )
+    train_ready = _filter_feature_complete_rows(train, feature_cols).orderBy("datetime")
+    train_ready.cache()
+    n_total = train_ready.count()
+    if n_total == 0:
+        raise ValueError(
+            "Learning curve: no training rows with all features non-null "
+            f"(checked {len(feature_cols)} columns)"
+        )
 
-    train_ordered = train.orderBy("datetime")
-    n_total = train_ordered.count()
     rows: list[dict[str, Any]] = []
 
     for frac in fractions:
         n_rows = max(500, int(n_total * frac))
-        subset = train_ordered.limit(n_rows)
+        subset = train_ready.limit(n_rows)
+
+        assembler = build_feature_pipeline(feature_cols)
+        rf = RandomForestRegressor(
+            featuresCol="features",
+            labelCol=LABEL_COL,
+            numTrees=ML_RF_NUM_TREES,
+            maxDepth=ML_RF_MAX_DEPTH,
+            seed=RANDOM_SEED,
+        )
         pipeline = Pipeline(stages=[assembler, rf])
         model = pipeline.fit(subset)
         train_metrics = evaluate_model(model.transform(subset))
@@ -80,6 +95,10 @@ def compute_rf_learning_curve(
         )
         del model
         gc.collect()
+
+    train_ready.unpersist()
+    if not rows:
+        raise ValueError("Learning curve: no fraction produced a non-empty training subset")
 
     return spark.createDataFrame(rows)
 

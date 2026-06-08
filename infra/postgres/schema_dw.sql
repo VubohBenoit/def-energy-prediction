@@ -214,6 +214,40 @@ CREATE INDEX IF NOT EXISTS idx_model_metrics_trained_at
 CREATE INDEX IF NOT EXISTS idx_model_metrics_model
     ON etl.model_metrics (model_name);
 
+CREATE OR REPLACE VIEW etl.v_model_metrics_latest AS
+WITH latest AS (
+    SELECT run_id
+    FROM etl.model_metrics
+    ORDER BY trained_at DESC NULLS LAST
+    LIMIT 1
+),
+ranked AS (
+    SELECT
+        m.*,
+        ROW_NUMBER() OVER (ORDER BY rmse ASC NULLS LAST) AS rang,
+        MIN(rmse) OVER () AS best_rmse
+    FROM etl.model_metrics m
+    WHERE m.run_id = (SELECT run_id FROM latest)
+)
+SELECT
+    rang,
+    CASE model_name
+        WHEN 'LinearRegression' THEN 'Régression linéaire'
+        WHEN 'DecisionTree' THEN 'Arbre de décision'
+        WHEN 'RandomForest' THEN 'Forêt aléatoire'
+        WHEN 'GradientBoosting' THEN 'Gradient Boosting'
+        ELSE model_name
+    END AS algorithme,
+    ROUND(rmse::numeric, 1)::double precision AS rmse_mw,
+    ROUND(mae::numeric, 1)::double precision AS mae_mw,
+    ROUND(mape_pct::numeric, 2)::double precision AS mape_pct,
+    ROUND(r2::numeric, 4)::double precision AS r2,
+    ROUND(train_time_s::numeric, 1)::double precision AS train_time_s,
+    ROUND((((rmse / NULLIF(best_rmse, 0)) - 1) * 100)::numeric, 1)::double precision AS rmse_ecart_pct,
+    (rang = 1) AS est_meilleur
+FROM ranked
+ORDER BY rang;
+
 -- Analytical views
 CREATE OR REPLACE VIEW dw.v_consumption_last_30_days AS
 SELECT

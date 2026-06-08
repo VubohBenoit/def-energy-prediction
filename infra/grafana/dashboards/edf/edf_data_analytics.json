@@ -164,7 +164,7 @@
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 27 },
       "id": 211,
       "options": { "colorMode": "value", "graphMode": "none", "textMode": "value", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^metric$/", "values": false } },
-      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT model_name AS metric FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC LIMIT 1) ORDER BY rmse ASC LIMIT 1", "refId": "A" }],
+      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT algorithme AS metric FROM etl.v_model_metrics_latest WHERE est_meilleur = true LIMIT 1", "refId": "A" }],
       "title": "Meilleur modèle",
       "type": "stat"
     },
@@ -174,7 +174,7 @@
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 27 },
       "id": 212,
       "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^metric$/", "values": false } },
-      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT ROUND(MIN(rmse)::numeric, 1)::double precision AS metric FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC LIMIT 1)", "refId": "A" }],
+      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT rmse_mw AS metric FROM etl.v_model_metrics_latest WHERE est_meilleur = true LIMIT 1", "refId": "A" }],
       "title": "RMSE minimal",
       "type": "stat"
     },
@@ -184,7 +184,7 @@
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 27 },
       "id": 213,
       "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^metric$/", "values": false } },
-      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT ROUND(MAX(r2)::numeric, 4)::double precision AS metric FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC LIMIT 1)", "refId": "A" }],
+      "targets": [{ "datasource": { "type": "postgres", "uid": "edf-postgres" }, "editorMode": "code", "format": "table", "rawSql": "SELECT r2 AS metric FROM etl.v_model_metrics_latest WHERE est_meilleur = true LIMIT 1", "refId": "A" }],
       "title": "R² max",
       "type": "stat"
     },
@@ -229,7 +229,7 @@
         "datasource": { "type": "postgres", "uid": "edf-postgres" },
         "editorMode": "code",
         "format": "table",
-        "rawSql": "SELECT model_name, ROUND(rmse::numeric, 1)::double precision AS rmse FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC LIMIT 1) ORDER BY rmse ASC",
+        "rawSql": "SELECT algorithme AS model_name, rmse_mw AS rmse FROM etl.v_model_metrics_latest ORDER BY rang",
         "refId": "A"
       }],
       "title": "RMSE par algorithme (dernier run)",
@@ -238,22 +238,29 @@
     {
       "datasource": { "type": "postgres", "uid": "edf-postgres" },
       "fieldConfig": {
-        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } }, "decimals": 2 },
+        "defaults": {
+          "custom": { "align": "center", "cellOptions": { "type": "auto" }, "filterable": false },
+          "decimals": 2
+        },
         "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "rmse" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "mode": "gradient", "type": "gauge" } }, { "id": "max", "value": 5000 }]
-          }
+          { "matcher": { "id": "byName", "options": "rang" }, "properties": [{ "id": "displayName", "value": "#" }, { "id": "custom.width", "value": 48 }] },
+          { "matcher": { "id": "byName", "options": "algorithme" }, "properties": [{ "id": "displayName", "value": "Algorithme" }, { "id": "custom.width", "value": 200 }, { "id": "custom.align", "value": "left" }] },
+          { "matcher": { "id": "byName", "options": "rmse_mw" }, "properties": [{ "id": "displayName", "value": "RMSE (MW)" }, { "id": "decimals", "value": 1 }, { "id": "custom.width", "value": 110 }] },
+          { "matcher": { "id": "byName", "options": "mae_mw" }, "properties": [{ "id": "displayName", "value": "MAE (MW)" }, { "id": "decimals", "value": 1 }, { "id": "custom.width", "value": 110 }] },
+          { "matcher": { "id": "byName", "options": "mape_pct" }, "properties": [{ "id": "displayName", "value": "MAPE (%)" }, { "id": "decimals", "value": 2 }, { "id": "unit", "value": "percent" }, { "id": "custom.width", "value": 100 }] },
+          { "matcher": { "id": "byName", "options": "r2" }, "properties": [{ "id": "displayName", "value": "R²" }, { "id": "decimals", "value": 4 }, { "id": "min", "value": 0 }, { "id": "max", "value": 1 }, { "id": "custom.width", "value": 90 }] },
+          { "matcher": { "id": "byName", "options": "train_time_s" }, "properties": [{ "id": "displayName", "value": "Durée (s)" }, { "id": "decimals", "value": 1 }, { "id": "unit", "value": "s" }, { "id": "custom.width", "value": 100 }] },
+          { "matcher": { "id": "byName", "options": "rmse_ecart_pct" }, "properties": [{ "id": "displayName", "value": "Δ RMSE (%)" }, { "id": "decimals", "value": 1 }, { "id": "unit", "value": "percent" }, { "id": "custom.width", "value": 110 }] }
         ]
       },
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 31 },
       "id": 216,
-      "options": { "cellHeight": "sm", "showHeader": true, "sortBy": [{ "desc": false, "displayName": "rmse" }] },
+      "options": { "cellHeight": "sm", "showHeader": true, "sortBy": [{ "desc": false, "displayName": "rang" }] },
       "targets": [{
         "datasource": { "type": "postgres", "uid": "edf-postgres" },
         "editorMode": "code",
         "format": "table",
-        "rawSql": "SELECT model_name, ROUND(rmse::numeric, 1) AS rmse, ROUND(mae::numeric, 1) AS mae, ROUND(mape_pct::numeric, 2) AS mape_pct, ROUND(r2::numeric, 4) AS r2, ROUND(train_time_s::numeric, 1) AS train_time_s FROM etl.model_metrics WHERE run_id = (SELECT run_id FROM etl.model_metrics ORDER BY trained_at DESC LIMIT 1) ORDER BY rmse ASC",
+        "rawSql": "SELECT rang, algorithme, rmse_mw, mae_mw, mape_pct, r2, train_time_s, rmse_ecart_pct FROM etl.v_model_metrics_latest ORDER BY rang",
         "refId": "A"
       }],
       "title": "Métriques détaillées — dernier run ML",

@@ -92,13 +92,11 @@ def clean(df: DataFrame) -> DataFrame:
             df = df.withColumn(col, F.col(col).cast(DoubleType()))
 
     df = df.withColumn("is_interpolated", F.col("consumption_mw").isNull())
+    df = df.withColumn("year", F.year("datetime"))
 
-    window_fw = Window.orderBy("datetime").rowsBetween(
-        Window.unboundedPreceding, 0
-    )
-    window_bw = Window.orderBy("datetime").rowsBetween(
-        0, Window.unboundedFollowing
-    )
+    w_year = Window.partitionBy("year").orderBy("datetime")
+    window_fw = w_year.rowsBetween(Window.unboundedPreceding, 0)
+    window_bw = w_year.rowsBetween(0, Window.unboundedFollowing)
     for col in ["consumption_mw", "nuclear_mw", "wind_mw", "solar_mw"]:
         if col in df.columns:
             df = df.withColumn(
@@ -147,14 +145,14 @@ def engineer_features(df: DataFrame) -> DataFrame:
         .withColumn("hour_cos", F.cos(F.lit(2 * math.pi) * F.col("hour") / 24))
     )
 
-    w = Window.orderBy("datetime")
+    w = Window.partitionBy("year").orderBy("datetime")
     df = (
         df.withColumn("lag_1h_mw", F.lag("consumption_mw", 2).over(w))
         .withColumn("lag_24h_mw", F.lag("consumption_mw", 48).over(w))
         .withColumn("lag_168h_mw", F.lag("consumption_mw", 336).over(w))
     )
 
-    w_24h = Window.orderBy("datetime").rowsBetween(-48, 0)
+    w_24h = Window.partitionBy("year").orderBy("datetime").rowsBetween(-48, 0)
     df = (
         df.withColumn("rolling_24h_mean", F.avg("consumption_mw").over(w_24h))
         .withColumn("rolling_24h_std", F.stddev("consumption_mw").over(w_24h))
